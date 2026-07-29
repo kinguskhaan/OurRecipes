@@ -1,0 +1,13 @@
+## Interface: 20505
+## Title: GuildThing
+## Notes: Browse and share who in the guild knows which recipes/enchants
+## Version: 1.0
+## SavedVariables: GuildThingDB
+
+Libs/LibDeflate.lua
+Libs/Base64.lua
+Libs/JSON.lua
+Data/Recipes.lua
+Core.lua
+GuildData.lua
+UI.lua

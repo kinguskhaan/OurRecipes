@@ -1,0 +1,71 @@
+local GT = GuildThing
+
+-- Decodes a guild.exportRoster string (base64(zlib(json)), same pipeline as
+-- Gargul's SoftRes import) and stores it in GuildThingDB.GuildData. Returns
+-- true on success, or false plus a human-readable error message.
+--
+-- Expected JSON shape (see addon/GuildThing/EXPORT_PLAN.md):
+-- {
+--   guild = "GuildName-Realm",
+--   exportedAt = 1234567890,
+--   characters = { { name = "...", realm = "...", class = "..." }, ... },
+--   recipes = { { name = "...", spellId = ..., itemId = ..., chars = { 0, 3, 7 } }, ... },
+-- }
+function GT.ImportGuildData(str)
+    str = (str or ""):gsub("%s+", "")
+    if str == "" then
+        return false, "Paste the export string from the website first."
+    end
+
+    local decodeOk, decoded = pcall(GuildThing_Base64.decode, str)
+    if not decodeOk or not decoded then
+        return false, "Couldn't base64-decode that — make sure you copied the whole string."
+    end
+
+    local zlibOk, decompressed = pcall(function()
+        return LibDeflate:DecompressZlib(decoded)
+    end)
+    if not zlibOk or not decompressed then
+        return false, "Couldn't decompress that — make sure you copied the whole string."
+    end
+
+    local jsonOk, data = pcall(function()
+        return GuildThing_JSON:decode(decompressed)
+    end)
+    if not jsonOk or type(data) ~= "table" then
+        return false, "Couldn't parse that as guild data."
+    end
+
+    if type(data.characters) ~= "table" or type(data.recipes) ~= "table" then
+        return false, "That doesn't look like guild export data."
+    end
+
+    local recipesByName = {}
+    for _, recipe in ipairs(data.recipes) do
+        if recipe.name and type(recipe.chars) == "table" then
+            recipesByName[recipe.name] = recipe.chars
+        end
+    end
+
+    GuildThingDB.GuildData = {
+        guild = data.guild,
+        exportedAt = tonumber(data.exportedAt) or 0,
+        importedAt = time(),
+        characters = data.characters,
+        recipesByName = recipesByName,
+    }
+
+    return true
+end
+
+function GT.GetGuildDataSummary()
+    local guildData = GuildThingDB.GuildData
+    if not guildData then return nil end
+
+    return string.format(
+        "%s — %d character(s), imported %s",
+        guildData.guild or "?",
+        #(guildData.characters or {}),
+        date("%Y-%m-%d %H:%M", guildData.importedAt)
+    )
+end
