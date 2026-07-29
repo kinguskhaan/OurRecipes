@@ -673,12 +673,27 @@ local function BuildOverviewPage(parent)
         toolbar:Hide()
         AnchorScrollBelow(breadcrumb, 8)
 
+        -- Whether we have (or ever had) an actual export for this character,
+        -- as opposed to just a live C_Club skill-level scan — determines
+        -- which of the two "no recipe data" messages below applies.
+        local hasAnyExport = char.isSelf or GT.FindGuildDataCharacterIndex(char.name, char.realm) ~= nil
+
         local items = {}
         for _, s in ipairs(GT.GetCharacterProfessionSummary(char.name, char.realm)) do
+            local sub, clickable
+            if s.count > 0 then
+                sub = tostring(s.count) .. " known"
+                clickable = true
+            elseif hasAnyExport then
+                sub = ("Level %d — recipe data may be outdated"):format(s.rank)
+            else
+                sub = ("Level %d — hasn't exported to GuildThing yet"):format(s.rank)
+            end
             table.insert(items, {
                 name = s.profession,
-                sub = tostring(s.count) .. " known",
-                onClick = function() ShowCharacterProfession(char, s.profession) end,
+                sub = sub,
+                dim = not clickable,
+                onClick = clickable and function() ShowCharacterProfession(char, s.profession) end or nil,
             })
         end
         if #items == 0 then

@@ -116,6 +116,81 @@ scanFrame:SetScript("OnEvent", function(_, event)
     end
 end)
 
+-- Blizzard's guild roster (C_Club, guilds are "clubs" under the hood) hands
+-- out every member's primary-profession skill level for free, no addon or
+-- export needed on their end — same mechanism Guild Roster Manager uses.
+-- Only covers the two PRIMARY profession slots though: Cooking and First
+-- Aid are secondary professions and never appear here, so this can only
+-- ever be a partial baseline (skill level, not known recipes) layered under
+-- the real recipe data from exports.
+local PRIMARY_PROFESSION_ID_TO_NAME = {
+    [164] = "Blacksmithing",
+    [165] = "Leatherworking",
+    [171] = "Alchemy",
+    [197] = "Tailoring",
+    [202] = "Engineering",
+    [333] = "Enchanting",
+    [755] = "Jewelcrafting",
+}
+
+local function ClubScanKey(name, realm)
+    return string.lower((name or "") .. "-" .. (realm or ""))
+end
+
+function GT.GetClubScanEntry(name, realm)
+    local scan = GuildThingDB.ClubScan
+    return scan and scan[ClubScanKey(name, realm)]
+end
+
+local function ScanGuildClubProfessions()
+    if not C_Club or not IsInGuild() then return end
+    local clubId = C_Club.GetGuildClubId and C_Club.GetGuildClubId()
+    if not clubId or clubId == 0 then return end
+
+    local ok, members = pcall(C_Club.GetClubMembers, clubId)
+    if not ok or not members then return end
+
+    -- Classic guilds are single-realm (no cross-realm guilds under this
+    -- ruleset), so every member shares the scanning player's realm.
+    local realm = GetRealmName()
+    local scan = {}
+
+    for _, memberId in ipairs(members) do
+        local infoOk, info = pcall(C_Club.GetMemberInfo, clubId, memberId)
+        if infoOk and info and info.name then
+            local professions = {}
+            local p1Name = PRIMARY_PROFESSION_ID_TO_NAME[info.profession1ID]
+            if p1Name and info.profession1Rank then
+                professions[p1Name] = info.profession1Rank
+            end
+            local p2Name = PRIMARY_PROFESSION_ID_TO_NAME[info.profession2ID]
+            if p2Name and info.profession2Rank then
+                professions[p2Name] = info.profession2Rank
+            end
+
+            local classFile
+            if info.classID and C_CreatureInfo and C_CreatureInfo.GetClassInfo then
+                local classInfo = C_CreatureInfo.GetClassInfo(info.classID)
+                classFile = classInfo and classInfo.classFile
+            end
+
+            scan[ClubScanKey(info.name, realm)] = {
+                name = info.name,
+                realm = realm,
+                class = classFile,
+                professions = professions,
+            }
+        end
+    end
+
+    GuildThingDB.ClubScan = scan
+end
+
+local clubScanFrame = CreateFrame("Frame")
+clubScanFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
+clubScanFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
+clubScanFrame:SetScript("OnEvent", ScanGuildClubProfessions)
+
 -- Nudges the player on login if they haven't exported this character to
 -- the website in a while — the addon only knows what it's scanned/exported
 -- locally, so stale unexported data is otherwise invisible to everyone else.
@@ -275,9 +350,10 @@ function GT.CharacterKnowsRecipe(name, realm, profName, recipeName)
     return false
 end
 
--- Every character we have any data for — self plus everyone from the last
--- guild-data import, deduped by name+realm (self wins if also present in
--- the import, since IsSelf and Roster keys match the same way).
+-- Every character we have any data for — self, everyone from the last
+-- guild-data import, AND everyone picked up by the live C_Club roster scan
+-- (which needs no export at all) — deduped by name+realm (self wins if also
+-- present elsewhere, since IsSelf and Roster keys match the same way).
 function GT.GetRoster()
     local roster = {}
     local seen = {}
@@ -299,13 +375,23 @@ function GT.GetRoster()
         end
     end
 
+    for _, entry in pairs(GuildThingDB.ClubScan or {}) do
+        addEntry(entry.name, entry.realm, entry.class, false)
+    end
+
     table.sort(roster, function(a, b) return a.name:lower() < b.name:lower() end)
     return roster
 end
 
--- Which professions a character knows at least one recipe in, with a count
--- for each — drives the Overview page's per-character profession list.
+-- Which professions a character has any data for, with a recipe count and/or
+-- a club-scanned skill rank — drives the Overview page's per-character
+-- profession list. A profession shows up here if EITHER is true:
+--   - count > 0 (they know at least one recipe in it, from an export)
+--   - rank is set (C_Club roster scan says they have that primary profession)
+-- rank without recipe data means "we know they have the profession, but not
+-- what they can craft" — the UI surfaces that gap instead of hiding it.
 function GT.GetCharacterProfessionSummary(name, realm)
+    local clubEntry = GT.GetClubScanEntry(name, realm)
     local summary = {}
     for _, profName in ipairs(GT.GetProfessionOrder()) do
         local count = 0
@@ -314,8 +400,9 @@ function GT.GetCharacterProfessionSummary(name, realm)
                 count = count + 1
             end
         end
-        if count > 0 then
-            table.insert(summary, { profession = profName, count = count })
+        local rank = clubEntry and clubEntry.professions[profName]
+        if count > 0 or rank then
+            table.insert(summary, { profession = profName, count = count, rank = rank })
         end
     end
     return summary
