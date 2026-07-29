@@ -7,6 +7,10 @@ local VISIBLE_ROWS = 13
 local SIDEBAR_WIDTH = 150
 local TEXTBOX_WIDTH = 440
 
+-----------------------------
+-- SHARED HELPERS --
+-----------------------------
+
 local function GetClassColor(class)
     local color = class and RAID_CLASS_COLORS and RAID_CLASS_COLORS[class]
     if color then
@@ -125,6 +129,10 @@ local function CreateTextBox(parent, width, height, readOnly)
     return border, editBox
 end
 
+-----------------------------
+-- IMPORT / EXPORT PAGE --
+-----------------------------
+
 local function BuildImportExportPage(parent)
     local page = CreateFrame("Frame", nil, parent)
     page:SetAllPoints()
@@ -231,6 +239,11 @@ local function BuildImportExportPage(parent)
 
     return page
 end
+
+-----------------------------
+-- PROFESSION BROWSER PAGE --
+-----------------------------
+-- Browse one of YOUR known professions' full recipe list.
 
 local function CreateProfessionRow(parent)
     local row = CreateFrame("Button", nil, parent)
@@ -384,6 +397,12 @@ end
 -- Simpler row for the Overview drill-down (roster / per-character
 -- profession list / per-character recipe list) — no crafters tooltip like
 -- CreateProfessionRow, just an optional icon + name + right-aligned subtext.
+-----------------------------
+-- OVERVIEW PAGE --
+-----------------------------
+-- Browse the whole guild roster, drilling down into any character's
+-- professions and known recipes.
+
 local function CreateOverviewRow(parent)
     local row = CreateFrame("Button", nil, parent)
     row:SetHeight(ROW_HEIGHT)
@@ -823,6 +842,11 @@ local function BuildOverviewPage(parent)
 
     return page
 end
+
+-----------------------------
+-- MAIN FRAME / CHROME --
+-----------------------------
+-- The window itself: sidebar tabs + the pages built above.
 
 local function CreateSidebarButton(parent)
     local btn = CreateFrame("Button", nil, parent)

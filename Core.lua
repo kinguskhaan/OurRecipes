@@ -3,6 +3,10 @@ GuildThingDB = GuildThingDB or {}
 GuildThing = GuildThing or {}
 local GT = GuildThing
 
+-----------------------------
+-- CHARACTER STATE (SELF) --
+-----------------------------
+
 local function CharKey()
     return UnitName("player") .. "-" .. GetRealmName()
 end
@@ -50,6 +54,12 @@ function GT.SaveProfession(skillName, recipes)
     entry.professions[skillName] = recipes
     entry.lastUpdate = time()
 end
+
+-----------------------------------
+-- PROFESSION SCANNING (LIVE) --
+-----------------------------------
+-- Fires while a Trade Skill / Craft window is open — this is what actually
+-- learns what recipes THIS character knows.
 
 -- The old TradeSkill/Craft APIs only ever expose the crafted item's link, not
 -- the recipe's spellID — there's no runtime call that returns it (confirmed:
@@ -115,6 +125,13 @@ scanFrame:SetScript("OnEvent", function(_, event)
         ScanCraft()
     end
 end)
+
+-----------------------------------
+-- GUILD ROSTER SCAN (C_CLUB) --
+-----------------------------------
+-- Automatic, no export needed — same mechanism Guild Roster Manager uses.
+-- Gives profession + skill LEVEL for the whole guild; never recipe-level
+-- detail (see the comment below on PRIMARY_PROFESSION_ID_TO_NAME for why).
 
 -- Blizzard's guild roster (C_Club, guilds are "clubs" under the hood) hands
 -- out every member's primary-profession skill level for free, no addon or
@@ -191,6 +208,10 @@ clubScanFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
 clubScanFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
 clubScanFrame:SetScript("OnEvent", ScanGuildClubProfessions)
 
+-----------------------------
+-- EXPORT REMINDER --
+-----------------------------
+
 -- Nudges the player on login if they haven't exported this character to
 -- the website in a while — the addon only knows what it's scanned/exported
 -- locally, so stale unexported data is otherwise invisible to everyone else.
@@ -218,6 +239,10 @@ local loginFrame = CreateFrame("Frame")
 loginFrame:RegisterEvent("PLAYER_LOGIN")
 loginFrame:SetScript("OnEvent", CheckExportReminder)
 
+-----------------------------
+-- WEBSITE EXPORT ENCODING --
+-----------------------------
+
 local function JSONEscape(s)
     s = s:gsub("\\", "\\\\")
     s = s:gsub("\"", "\\\"")
@@ -238,6 +263,12 @@ local function EncodeRecipes(recipes)
     return "[" .. table.concat(parts, ",") .. "]"
 end
 
+-----------------------------
+-- CATALOG / PROFESSION DATA ACCESS --
+-----------------------------
+
+-- Professions THIS character has actually scanned locally (may be a subset
+-- of the full catalog below).
 function GT.GetProfessionNames()
     local entry = GetCharEntry()
     local names = {}
@@ -255,10 +286,13 @@ function GT.GetProfessionOrder()
     return GuildThing_CatalogOrder or {}
 end
 
+-- The full catalog entry list for one profession (name/icon/kind/id per
+-- recipe), regardless of whether anyone's actually scanned/known it.
 function GT.GetCatalogForProfession(profName)
     return (GuildThing_Catalog or {})[profName] or {}
 end
 
+-- Does THIS character (not guildies) know the given recipe?
 function GT.IsKnownBySelf(profName, recipeName)
     local recipes = GetCharEntry().professions[profName]
     if not recipes then return false end
@@ -269,6 +303,10 @@ function GT.IsKnownBySelf(profName, recipeName)
     end
     return false
 end
+
+-----------------------------
+-- CRAFTERS LOOKUP --
+-----------------------------
 
 -- Who (self and/or imported guildies) can craft the given recipe.
 -- Returns a list of { name, realm, class }.
@@ -306,6 +344,12 @@ function GT.GetCraftersForRecipe(profName, recipeName)
     return crafters
 end
 
+-----------------------------
+-- GUILD DATA IMPORT LOOKUPS --
+-----------------------------
+-- Everything here reads GuildThingDB.GuildData, populated by
+-- GT.ImportGuildData (GuildData.lua) from a website-exported string.
+
 -- 0-based index (matching the JS array position the website exported,
 -- same convention as GetCraftersForRecipe) of a character within the
 -- imported guild data, or nil if that name/realm isn't in it.
@@ -330,6 +374,7 @@ function GT.FindGuildDataCharacterIndex(name, realm)
     return nil
 end
 
+-- Is (name, realm) THIS character, as opposed to some other guildie?
 local function IsSelf(name, realm)
     local entry = GetCharEntry()
     return string.lower(name or "") == string.lower(entry.name)
@@ -366,6 +411,12 @@ function GT.CharacterKnowsRecipe(name, realm, profName, recipeName)
     end
     return false
 end
+
+-----------------------------
+-- ROSTER & OVERVIEW --
+-----------------------------
+-- Combines all three data sources (self scan, website import, C_Club scan)
+-- into what the Overview page actually renders.
 
 -- Every character we have any data for — self, everyone from the last
 -- guild-data import, AND everyone picked up by the live C_Club roster scan
@@ -485,12 +536,20 @@ function GT.GetCharacterRecipeStatuses(name, realm, profName)
     return list
 end
 
+-----------------------------
+-- WEBSITE EXPORT (PUBLIC API) --
+-----------------------------
+
 function GT.GetLastImportText()
     local entry = GetCharEntry()
     if not entry.lastImport then return nil end
     return date("%Y-%m-%d %H:%M", entry.lastImport)
 end
 
+-- Builds the export string this character's export box shows — plain JSON,
+-- unlike the GuildData import direction (GuildData.lua) which is
+-- Base64+zlib-compressed; this one is short enough per-character not to
+-- need it.
 function GT.ExportCurrentCharacter()
     local entry = GetCharEntry()
     entry.lastImport = time()
