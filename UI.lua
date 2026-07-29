@@ -445,6 +445,10 @@ local function BuildOverviewPage(parent)
     -- Set of active profession names (not a single value) — multiple can
     -- be toggled on at once, OR'd together in RebuildRoster below.
     local activeProfessionFilters = {}
+    -- Pseudo-filter alongside the real profession names — characters with
+    -- no profession data at all are hidden by default (see RebuildRoster);
+    -- toggling this is the only way to bring them back.
+    local NO_PROFESSION_LABEL = "No profession"
 
     -- Profession filter row — roster only (level 1). Plain clickable text,
     -- not buttons: normal color when off, a highlight color when toggled
@@ -471,7 +475,14 @@ local function BuildOverviewPage(parent)
         local maxRowWidth = TEXTBOX_WIDTH
         local rowHeight, spacing = 14, 12
         local x, y = 0, 0
+
+        local filterOptions = {}
         for _, profName in ipairs(GT.GetProfessionOrder()) do
+            table.insert(filterOptions, profName)
+        end
+        table.insert(filterOptions, NO_PROFESSION_LABEL)
+
+        for _, profName in ipairs(filterOptions) do
             local hitbox = CreateFrame("Button", nil, filterBar)
             hitbox:SetHeight(rowHeight)
 
@@ -648,26 +659,58 @@ local function BuildOverviewPage(parent)
 
     RebuildRoster = function()
         local items = {}
+        local hasNoFilters = not next(activeProfessionFilters)
         for _, char in ipairs(GT.GetRoster()) do
             local summary = GT.GetCharacterProfessionSummary(char.name, char.realm)
             local profTags = {}
-            local matchesFilter = not next(activeProfessionFilters)
-            for _, s in ipairs(summary) do
-                table.insert(profTags, FormatProfessionTag(s))
-                if activeProfessionFilters[s.profession] then
-                    matchesFilter = true
+            local matchesFilter = false
+
+            -- Highest rank among the professions actually relevant to the
+            -- current view (the active filters, or all of them if none are
+            -- set) — drives the sort below, highest first.
+            local sortRank = 0
+
+            if #summary > 0 then
+                -- Default (no filters active) shows anyone with at least
+                -- one profession; explicit filters narrow that down.
+                matchesFilter = hasNoFilters
+                for _, s in ipairs(summary) do
+                    table.insert(profTags, FormatProfessionTag(s))
+                    local isRelevant = hasNoFilters or activeProfessionFilters[s.profession]
+                    if isRelevant then
+                        matchesFilter = true
+                        if s.rank and s.rank > sortRank then
+                            sortRank = s.rank
+                        end
+                    end
                 end
+            else
+                -- No profession data at all — hidden by default, only
+                -- shown when that's explicitly toggled on.
+                matchesFilter = activeProfessionFilters[NO_PROFESSION_LABEL] == true
             end
+
             if matchesFilter then
                 local r, g, b = GetClassColor(char.class)
                 table.insert(items, {
                     name = char.name .. (char.isSelf and " (you)" or ""),
                     sub = #profTags > 0 and table.concat(profTags, ", ") or "no professions known",
                     r = r, g = g, b = b,
+                    sortRank = sortRank,
                     onClick = function() ShowCharacter(char) end,
                 })
             end
         end
+
+        -- Highest rank first (relevant-to-current-filter rank, see above),
+        -- alphabetical as a tiebreak / for those with no rank at all.
+        table.sort(items, function(a, b)
+            if a.sortRank ~= b.sortRank then
+                return a.sortRank > b.sortRank
+            end
+            return a.name:lower() < b.name:lower()
+        end)
+
         page.items = items
         UpdateRows()
     end
