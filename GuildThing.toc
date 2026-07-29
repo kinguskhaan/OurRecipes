@@ -1,5 +1,5 @@
 ## Interface: 20505
-## Title: GuildThing
+## Title: Our Recipes!
 ## Notes: Browse and share who in the guild knows which recipes/enchants
 ## Version: 1.0
 ## SavedVariables: GuildThingDB
