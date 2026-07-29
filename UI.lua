@@ -630,14 +630,30 @@ local function BuildOverviewPage(parent)
         FauxScrollFrame_OnVerticalScroll(self, offset, ROW_HEIGHT, UpdateRows)
     end)
 
+    -- "Engineering 375", or "Engineering 375 (no data)" when we know the
+    -- skill level (via C_Club) but have no export telling us what they can
+    -- actually craft. Secondary professions (Cooking, First Aid) never get a
+    -- level here — C_Club only reports the two primary-profession slots —
+    -- so those just show the name.
+    local function FormatProfessionTag(s)
+        local tag = s.profession
+        if s.rank then
+            tag = tag .. " " .. s.rank
+        end
+        if s.count == 0 then
+            tag = tag .. " (no data)"
+        end
+        return tag
+    end
+
     RebuildRoster = function()
         local items = {}
         for _, char in ipairs(GT.GetRoster()) do
             local summary = GT.GetCharacterProfessionSummary(char.name, char.realm)
-            local profNames = {}
+            local profTags = {}
             local matchesFilter = not next(activeProfessionFilters)
             for _, s in ipairs(summary) do
-                table.insert(profNames, s.profession)
+                table.insert(profTags, FormatProfessionTag(s))
                 if activeProfessionFilters[s.profession] then
                     matchesFilter = true
                 end
@@ -646,7 +662,7 @@ local function BuildOverviewPage(parent)
                 local r, g, b = GetClassColor(char.class)
                 table.insert(items, {
                     name = char.name .. (char.isSelf and " (you)" or ""),
-                    sub = #profNames > 0 and table.concat(profNames, ", ") or "no professions known",
+                    sub = #profTags > 0 and table.concat(profTags, ", ") or "no professions known",
                     r = r, g = g, b = b,
                     onClick = function() ShowCharacter(char) end,
                 })
