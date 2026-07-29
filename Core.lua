@@ -51,6 +51,22 @@ function GT.SaveProfession(skillName, recipes)
     entry.lastUpdate = time()
 end
 
+-- The old TradeSkill/Craft APIs only ever expose the crafted item's link, not
+-- the recipe's spellID — there's no runtime call that returns it (confirmed:
+-- GetTradeSkillRecipeLink returns bracket-text with no hyperlink escape, and
+-- C_TradeSkillUI's recipe functions don't back this client's profession
+-- data). The bundled catalog (Data/Recipes.lua, built by `pnpm addon:catalog`
+-- from external recipe data) already has name->spellID for every recipe, so
+-- fill it in from there instead.
+local function LookupCatalogSpellID(profName, name)
+    for _, r in ipairs(GT.GetCatalogForProfession(profName)) do
+        if r.name == name and r.kind == "spell" then
+            return r.id
+        end
+    end
+    return nil
+end
+
 local function ScanTradeSkill()
     local skillName = GetTradeSkillLine()
     if not skillName or skillName == "" then return end
@@ -60,7 +76,8 @@ local function ScanTradeSkill()
         if name and skillType ~= "header" and skillType ~= "subheader" then
             local link = GetTradeSkillItemLink(i)
             local itemID = link and tonumber(link:match("item:(%d+)"))
-            table.insert(recipes, { name = name, itemID = itemID, spellID = nil })
+            local spellID = LookupCatalogSpellID(skillName, name)
+            table.insert(recipes, { name = name, itemID = itemID, spellID = spellID })
         end
     end
     GT.SaveProfession(skillName, recipes)
@@ -77,6 +94,9 @@ local function ScanCraft()
             local link = GetCraftItemLink(i)
             local itemID = link and tonumber(link:match("item:(%d+)"))
             local spellID = link and tonumber(link:match("enchant:(%d+)"))
+            if not spellID then
+                spellID = LookupCatalogSpellID(skillName, name)
+            end
             table.insert(recipes, { name = name, itemID = itemID, spellID = spellID })
         end
     end
