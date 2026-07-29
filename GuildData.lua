@@ -41,10 +41,28 @@ function GT.ImportGuildData(str)
     end
 
     local recipesByName = {}
+    -- Reverse of recipesByName: jsIndex -> set of recipe names that
+    -- character knows. Built once here instead of re-scanning
+    -- recipesByName's char-index arrays on every Overview lookup — with a
+    -- full guild roster (via the C_Club scan) that rescan happened once per
+    -- recipe per guild member and was the source of very visible UI lag.
+    local recipeNamesByCharIndex = {}
     for _, recipe in ipairs(data.recipes) do
         if recipe.name and type(recipe.chars) == "table" then
             recipesByName[recipe.name] = recipe.chars
+            for _, idx in ipairs(recipe.chars) do
+                recipeNamesByCharIndex[idx] = recipeNamesByCharIndex[idx] or {}
+                recipeNamesByCharIndex[idx][recipe.name] = true
+            end
         end
+    end
+
+    -- name-realm key -> 0-based jsIndex, same lookup FindGuildDataCharacterIndex
+    -- used to do with a linear scan every call.
+    local characterIndexByKey = {}
+    for i, char in ipairs(data.characters) do
+        local key = string.lower((char.name or "") .. "-" .. (char.realm or ""))
+        characterIndexByKey[key] = i - 1
     end
 
     GuildThingDB.GuildData = {
@@ -53,6 +71,8 @@ function GT.ImportGuildData(str)
         importedAt = time(),
         characters = data.characters,
         recipesByName = recipesByName,
+        recipeNamesByCharIndex = recipeNamesByCharIndex,
+        characterIndexByKey = characterIndexByKey,
     }
 
     return true

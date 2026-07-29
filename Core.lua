@@ -314,6 +314,14 @@ function GT.FindGuildDataCharacterIndex(name, realm)
     if not guildData or not guildData.characters then return nil end
 
     local key = string.lower((name or "") .. "-" .. (realm or ""))
+
+    -- O(1) via the index built at import time. Older saved data from before
+    -- this existed won't have it — fall back to the linear scan rather than
+    -- breaking until the next re-import.
+    if guildData.characterIndexByKey then
+        return guildData.characterIndexByKey[key]
+    end
+
     for i, char in ipairs(guildData.characters) do
         if string.lower((char.name or "") .. "-" .. (char.realm or "")) == key then
             return i - 1
@@ -341,7 +349,16 @@ function GT.CharacterKnowsRecipe(name, realm, profName, recipeName)
     if jsIndex == nil then return false end
 
     local guildData = GuildThingDB.GuildData
-    local charIndices = guildData and guildData.recipesByName and guildData.recipesByName[recipeName]
+    if not guildData then return false end
+
+    -- O(1) via the reverse index built at import time. Falls back to
+    -- scanning the recipe's char-index array for older saved data.
+    if guildData.recipeNamesByCharIndex then
+        local known = guildData.recipeNamesByCharIndex[jsIndex]
+        return known ~= nil and known[recipeName] == true
+    end
+
+    local charIndices = guildData.recipesByName and guildData.recipesByName[recipeName]
     if not charIndices then return false end
 
     for _, idx in ipairs(charIndices) do
@@ -383,6 +400,46 @@ function GT.GetRoster()
     return roster
 end
 
+-- Every recipe name a character knows, self or imported, as a set — resolved
+-- ONCE per character instead of once per catalog recipe. The two functions
+-- below used to call CharacterKnowsRecipe (which redoes the self/import
+-- lookup from scratch) for every recipe in the ~2000-entry catalog; with a
+-- full guild roster via the C_Club scan that's catalog-size x guild-size
+-- redundant lookups on every single Overview click, visible as UI lag.
+local function GetKnownRecipeNames(name, realm)
+    if IsSelf(name, realm) then
+        local set = {}
+        for _, recipes in pairs(GetCharEntry().professions) do
+            for _, r in ipairs(recipes) do
+                set[r.name] = true
+            end
+        end
+        return set
+    end
+
+    local jsIndex = GT.FindGuildDataCharacterIndex(name, realm)
+    if jsIndex == nil then return {} end
+
+    local guildData = GuildThingDB.GuildData
+    if guildData and guildData.recipeNamesByCharIndex then
+        return guildData.recipeNamesByCharIndex[jsIndex] or {}
+    end
+
+    -- Fallback for saved data imported before recipeNamesByCharIndex existed.
+    local set = {}
+    if guildData and guildData.recipesByName then
+        for recipeName, charIndices in pairs(guildData.recipesByName) do
+            for _, idx in ipairs(charIndices) do
+                if idx == jsIndex then
+                    set[recipeName] = true
+                    break
+                end
+            end
+        end
+    end
+    return set
+end
+
 -- Which professions a character has any data for, with a recipe count and/or
 -- a club-scanned skill rank — drives the Overview page's per-character
 -- profession list. A profession shows up here if EITHER is true:
@@ -392,11 +449,12 @@ end
 -- what they can craft" — the UI surfaces that gap instead of hiding it.
 function GT.GetCharacterProfessionSummary(name, realm)
     local clubEntry = GT.GetClubScanEntry(name, realm)
+    local knownNames = GetKnownRecipeNames(name, realm)
     local summary = {}
     for _, profName in ipairs(GT.GetProfessionOrder()) do
         local count = 0
         for _, recipe in ipairs(GT.GetCatalogForProfession(profName)) do
-            if GT.CharacterKnowsRecipe(name, realm, profName, recipe.name) then
+            if knownNames[recipe.name] then
                 count = count + 1
             end
         end
@@ -413,6 +471,7 @@ end
 -- what they *don't* have too (greyed out), same visual language as the
 -- main profession browser.
 function GT.GetCharacterRecipeStatuses(name, realm, profName)
+    local knownNames = GetKnownRecipeNames(name, realm)
     local list = {}
     for _, recipe in ipairs(GT.GetCatalogForProfession(profName)) do
         table.insert(list, {
@@ -420,7 +479,7 @@ function GT.GetCharacterRecipeStatuses(name, realm, profName)
             icon = recipe.icon,
             kind = recipe.kind,
             id = recipe.id,
-            known = GT.CharacterKnowsRecipe(name, realm, profName, recipe.name),
+            known = knownNames[recipe.name] == true,
         })
     end
     return list
