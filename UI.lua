@@ -1029,6 +1029,8 @@ local function ToggleGTFrame()
     end
 end
 
+GT.ToggleUI = ToggleGTFrame
+
 SLASH_GUILDTHING1 = "/gt"
 SLASH_GUILDTHING2 = "/guildthing"
 SlashCmdList["GUILDTHING"] = ToggleGTFrame

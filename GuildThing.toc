@@ -11,3 +11,4 @@ Data/Recipes.lua
 Core.lua
 GuildData.lua
 UI.lua
+Minimap.lua
