@@ -11,6 +11,36 @@ local GT = GuildThing
 -- Populates GuildThingDB.P2PData, read directly by Core.lua (same
 -- relationship GuildData.lua already has with GuildThingDB.GuildData).
 
+-----------------------------
+-- ALGORITHM --
+-----------------------------
+-- 1-2 are built, 3-5 are planned.
+--
+-- knownPeers = a table of everyone we've heard from before. Hearing
+-- any message proves they have the addon, so that's the whole
+-- discovery mechanism.
+
+-- 1. BROADCAST — on login, or when own recipes changed, compress own
+--    known recipes and send to guild chat. Skip if unchanged and sent
+--    recently (24h, longer once knownPeers has ~10 people). This is
+--    mainly for onboarding new people, not for freshness.
+
+-- 2. RECEIVE — rebuild the compressed data, save it, add sender to
+--    knownPeers. We fill in the new recipes, never overwrite, so we
+--    don't risk writing over stuff with old data.
+
+-- 3. REACTIVE HELLO [planned] — hear someone new for the first time ->
+--    whisper them your own stuff back, they will also add you to their
+--    own knownPeers table.
+
+-- 4. GOSSIP HANDSHAKE [planned] — every so often, whisper one known
+--    peer, compare a quick hash first. Only exchange more if it
+--    doesn't match.
+
+-- 5. ASK [planned] — whisper someone directly for one specific
+--    person's data, merge it in (recipes only ever get added, so
+--    merging is always safe).
+
 local ADDON_PREFIX = "GT_RECIPES"
 local CHUNK_BODY_LIMIT = 230 -- addon messages cap at 255 chars; header eats ~16-25
 local CHUNK_SEND_DELAY = 0.3 -- stagger sends, avoid flood protection (matches GRM's own throttle precedent)
