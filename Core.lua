@@ -28,6 +28,27 @@ function GT.SaveProfession(skillName, recipes)
     local entry = GetCharEntry()
     local oldRecipes = entry.professions[skillName]
 
+    -- recipes only ever reflects what's CURRENTLY VISIBLE in the trade skill
+    -- window — a search box or "only show craftable" filter (Auctionator's
+    -- own, or Blizzard's built-in one) narrows what GetNumTradeSkills/
+    -- GetTradeSkillInfo return, and TRADE_SKILL_UPDATE fires on every filter
+    -- change too, not just on a real scan. So a scan mid-search must never
+    -- overwrite recipes it simply didn't see this time — merge into the
+    -- existing set instead of replacing it. Recipes are never unlearned in
+    -- classic, so the union is always the correct full picture.
+    local merged, seen = {}, {}
+    for _, r in ipairs(recipes) do
+        table.insert(merged, r)
+        seen[r.name] = true
+    end
+    if oldRecipes then
+        for _, r in ipairs(oldRecipes) do
+            if not seen[r.name] then
+                table.insert(merged, r)
+            end
+        end
+    end
+
     -- Only diff against a previous scan of this exact profession — on the
     -- very first scan ever (oldRecipes is nil) there's nothing to compare
     -- against, and treating "everything you already know" as newly
@@ -51,7 +72,7 @@ function GT.SaveProfession(skillName, recipes)
         end
     end
 
-    entry.professions[skillName] = recipes
+    entry.professions[skillName] = merged
     entry.lastUpdate = time()
 end
 
