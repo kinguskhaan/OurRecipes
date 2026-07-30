@@ -159,6 +159,14 @@ function GT.GetClubScanEntry(name, realm)
     return scan and scan[ClubScanKey(name, realm)]
 end
 
+-- Populated by P2PSync.lua from the addon-message mesh — recipe-level
+-- data received directly from another GuildThing client, no export
+-- needed. Same key convention as ClubScan above.
+function GT.GetP2PEntry(name, realm)
+    local data = GuildThingDB.P2PData
+    return data and data[ClubScanKey(name, realm)]
+end
+
 local function ScanGuildClubProfessions()
     if not C_Club or not IsInGuild() then return end
     local clubId = C_Club.GetGuildClubId and C_Club.GetGuildClubId()
