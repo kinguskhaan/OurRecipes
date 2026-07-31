@@ -2,6 +2,20 @@
 
 All notable changes to this addon are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Settings page: "Force broadcast now" button sends your known recipes to the guild immediately, ignoring the throttle — same entry point as `/or debug broadcast`.
+
+### Changed
+
+- P2P announce throttle now has a bootstrap phase: below 5 known peers, you announce on every login with no wait, so a new or isolated client gets found fast. The existing announce-interval/slowdown settings only kick in once you're past that.
+
+### Fixed
+
+- Debug output and export reminders referenced a nonexistent `/gt` slash command; the addon only registers `/or` (and `/ourrecipes`).
+
 ## [0.1.0-beta.1] - 2026-07-31
 
 First beta. Headline feature is peer-to-peer recipe sync.

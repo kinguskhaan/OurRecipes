@@ -1017,8 +1017,11 @@ local function BuildSettingsPage(parent)
 
     local announceIntervalBox = AddNumberSetting(
         "Announce interval (hours)",
-        "How often you re-tell the guild your known recipes, while you're"
-            .. " below the peer count threshold set below. Default: 24.",
+        ("Below %d known peers you announce on every login, no waiting."
+            .. " From %d peers up to the threshold below, this is how often"
+            .. " you re-tell the guild instead. Default: 24."):format(
+                GT.GetBootstrapPeerThreshold(), GT.GetBootstrapPeerThreshold()
+            ),
         p2pHint,
         function() return GT.GetP2PSettings().announceIntervalHours end,
         GT.SetP2PAnnounceIntervalHours
@@ -1044,10 +1047,15 @@ local function BuildSettingsPage(parent)
     effectiveStatus:SetTextColor(0.6, 0.6, 0.6)
 
     local function RefreshEffectiveStatus()
-        effectiveStatus:SetText(("Right now: you know %d peer(s) — announcing every %dh."):format(
-            GT.CountKnownPeers(),
-            GT.GetEffectiveAnnounceIntervalHours()
-        ))
+        local peers = GT.CountKnownPeers()
+        if peers < GT.GetBootstrapPeerThreshold() then
+            effectiveStatus:SetText(("Right now: you know %d peer(s) — announcing every login."):format(peers))
+        else
+            effectiveStatus:SetText(("Right now: you know %d peer(s) — announcing every %dh."):format(
+                peers,
+                GT.GetEffectiveAnnounceIntervalHours()
+            ))
+        end
     end
 
     -- Manual peer cleanup — GT.PruneDepartedPeers also runs automatically
@@ -1073,12 +1081,34 @@ local function BuildSettingsPage(parent)
         RefreshEffectiveStatus()
     end)
 
+    -- Same entry point as "/or debug broadcast" — skips the throttle
+    -- entirely, same as GT.DebugForceBroadcast(true) below.
+    local forceBroadcastBtn = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+    forceBroadcastBtn:SetSize(190, 22)
+    forceBroadcastBtn:SetPoint("TOPLEFT", pruneStatus, "BOTTOMLEFT", 0, -10)
+    forceBroadcastBtn:SetText("Force broadcast now")
+
+    local forceBroadcastHint = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    forceBroadcastHint:SetPoint("TOPLEFT", forceBroadcastBtn, "BOTTOMLEFT", 2, -6)
+    forceBroadcastHint:SetPoint("RIGHT", page, "RIGHT", -12, 0)
+    forceBroadcastHint:SetJustifyH("LEFT")
+    forceBroadcastHint:SetText("Sends your known recipes to the guild right now, ignoring the throttle above.")
+
+    local forceBroadcastStatus = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    forceBroadcastStatus:SetPoint("TOPLEFT", forceBroadcastHint, "BOTTOMLEFT", 0, -6)
+
+    forceBroadcastBtn:SetScript("OnClick", function()
+        GT.DebugForceBroadcast()
+        forceBroadcastStatus:SetText("Broadcast sent.")
+    end)
+
     page.Refresh = function()
         minimapCheck:SetChecked(not GuildThingDB.minimap.hide)
         announceIntervalBox.Refresh()
         peerThresholdBox.Refresh()
         RefreshEffectiveStatus()
         pruneStatus:SetText("")
+        forceBroadcastStatus:SetText("")
     end
 
     return page

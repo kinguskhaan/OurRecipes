@@ -32,9 +32,11 @@ local GT = GuildThing
 -- firing everything at once.
 
 -- 1. BROADCAST — on login, or when own recipes changed, compress own
---    known recipes and send to guild chat. Skip if unchanged and sent
---    recently (user-configurable announceIntervalHours, 24h default;
---    multiplied by SLOWDOWN_FACTOR once knownPeers reaches
+--    known recipes and send to guild chat. Below BOOTSTRAP_PEER_THRESHOLD
+--    known peers, no throttle at all — every login rebroadcasts, since a
+--    fresh/isolated client needs to be found fast. Above that, skip if
+--    unchanged and sent recently (user-configurable announceIntervalHours,
+--    24h default; multiplied by SLOWDOWN_FACTOR once knownPeers reaches
 --    peerThreshold, also user-configurable, 10 default — see
 --    GetP2PSettings/GetResendIntervalSeconds below). This is mainly for
 --    onboarding new people, not for freshness — once most of the guild
@@ -81,6 +83,13 @@ local SEQ_WRAP = 100
 -- reason about without also configuring the slowdown multiplier.
 local SLOWDOWN_FACTOR = 3
 
+-- Below this many known peers, GetResendIntervalSeconds skips the
+-- throttle entirely (returns 0) — a brand new or isolated client should
+-- get found fast, so every login re-announces rather than waiting on
+-- announceIntervalHours. Fixed, not a user setting, same reasoning as
+-- SLOWDOWN_FACTOR above.
+local BOOTSTRAP_PEER_THRESHOLD = 5
+
 local function GetP2PSettings()
 	GuildThingDB.p2pSettings = GuildThingDB.p2pSettings or {}
 	local settings = GuildThingDB.p2pSettings
@@ -108,8 +117,12 @@ end
 
 local function GetResendIntervalSeconds()
 	local settings = GetP2PSettings()
+	local knownPeers = CountKnownPeers()
+	if knownPeers < BOOTSTRAP_PEER_THRESHOLD then
+		return 0
+	end
 	local seconds = settings.announceIntervalHours * 3600
-	if CountKnownPeers() >= settings.peerThreshold then
+	if knownPeers >= settings.peerThreshold then
 		seconds = seconds * SLOWDOWN_FACTOR
 	end
 	return seconds
@@ -119,6 +132,7 @@ end
 -- actually works out to right now, so the two raw numbers aren't the only
 -- thing a user has to reason about.
 GT.CountKnownPeers = CountKnownPeers
+GT.GetBootstrapPeerThreshold = function() return BOOTSTRAP_PEER_THRESHOLD end
 
 function GT.GetEffectiveAnnounceIntervalHours()
 	return GetResendIntervalSeconds() / 3600
