@@ -205,17 +205,29 @@ function ChatThrottleLib:Init()
 	self.HardThrottlingBeginTime = GetTime()	-- v11: Throttle hard for a few seconds after startup
 
 	-- Hook SendChatMessage and SendAddonMessage so we can measure unpiped traffic and avoid overloads (v7)
+	--
+	-- GuildThing note: hooksecurefunc("Name", fn) errors out immediately if
+	-- _G["Name"] is nil — some Classic Era clients have moved these to
+	-- C_ChatInfo (same client this addon already saw GuildRoster() vanish
+	-- from). An error here is unrecoverable and happens at file-load time,
+	-- before anything later in the .toc (including UI.lua's slash command
+	-- registration) ever runs — hence guarding each hook individually
+	-- instead of letting a missing global take down the whole addon.
 	if not self.securelyHooked then
 		-- Use secure hooks as of v16. Old regular hook support yanked out in v21.
 		self.securelyHooked = true
 		--SendChatMessage
-		hooksecurefunc("SendChatMessage", function(...)
-			return ChatThrottleLib.Hook_SendChatMessage(...)
-		end)
+		if SendChatMessage then
+			hooksecurefunc("SendChatMessage", function(...)
+				return ChatThrottleLib.Hook_SendChatMessage(...)
+			end)
+		end
 		--SendAddonMessage
-		hooksecurefunc("SendAddonMessage", function(...)
-			return ChatThrottleLib.Hook_SendAddonMessage(...)
-		end)
+		if SendAddonMessage then
+			hooksecurefunc("SendAddonMessage", function(...)
+				return ChatThrottleLib.Hook_SendAddonMessage(...)
+			end)
+		end
 	end
 	self.nBypass = 0
 end
