@@ -312,8 +312,9 @@ end
 -- Classic-era roster lookup by name — GuildThingDB.ClubScan (Core.lua)
 -- doesn't track online status, so this is the simplest direct source.
 -- Guild size keeps this cheap even scanned once per candidate; gossip
--- only runs hourly.
-local function IsGuildMemberOnline(name)
+-- only runs hourly. Returns the roster's online flag, or nil if the
+-- name isn't a guild member at all.
+local function FindGuildRosterEntry(name)
 	for i = 1, GetNumGuildMembers() do
 		local rosterName, _, _, _, _, _, _, _, online = GetGuildRosterInfo(i)
 		local rosterShortName = rosterName and rosterName:match("^([^-]+)")
@@ -321,7 +322,18 @@ local function IsGuildMemberOnline(name)
 			return online
 		end
 	end
-	return false
+	return nil
+end
+
+local function IsGuildMemberOnline(name)
+	return FindGuildRosterEntry(name) == true
+end
+
+-- WHISPER isn't guild-scoped in WoW — anyone who knows this addon's
+-- prefix/format could whisper an ASKQ for guild recipe data without
+-- being a member. OnAskRequest checks this before ever replying.
+local function IsGuildMember(name)
+	return FindGuildRosterEntry(name) ~= nil
 end
 
 local function GetGossipState()
@@ -403,15 +415,33 @@ local function OnAckDigest(senderName, rowsStr)
 	end
 end
 
+-- In-memory, keyed by "asker:target" — not per-asker, since one honest
+-- gossip round can legitimately ASK about DIGEST_ROW_LIMIT different
+-- people back to back. Only blocks asking about the SAME person
+-- repeatedly, which is what spam/abuse would actually look like.
+local ASK_COOLDOWN_SECONDS = 60
+local askCooldowns = {}
+
 -- Someone asked for a specific person's cached data. Re-encode their
 -- recipe names back into spellIDs (recipeNameToSpellID) so the reply
 -- goes out in the same compact chunked format as a normal broadcast,
 -- just tagged with whose data it actually is.
 local function OnAskRequest(senderName, targetName)
+	if not IsGuildMember(senderName) then
+		return
+	end
+
+	local cooldownKey = senderName .. ":" .. targetName
+	local lastAnswered = askCooldowns[cooldownKey]
+	if lastAnswered and (time() - lastAnswered) < ASK_COOLDOWN_SECONDS then
+		return
+	end
+
 	local entry = GuildThingDB.P2PData and GuildThingDB.P2PData[GT.ClubScanKey(targetName, GetRealmName())]
 	if not entry then
 		return
 	end
+	askCooldowns[cooldownKey] = time()
 
 	local ids = {}
 	for name in pairs(entry.recipeNames) do
