@@ -518,8 +518,24 @@ local function BuildOverviewPage(parent)
     -- toggling this is the only way to bring them back.
     local NO_PROFESSION_LABEL = "No profession"
 
-    -- Live-updates as you type, same as the level-3 recipe search box below.
-    rosterSearchBox:SetScript("OnTextChanged", function() RebuildRoster() end)
+    -- Live-updates as you type, same as the level-3 recipe search box below
+    -- — but debounced. GetCharacterProfessionSummary (called per roster
+    -- member in RebuildRoster) walks the whole ~2170-recipe catalog per
+    -- character; on every keystroke, for a guild-sized roster, that's
+    -- enough synchronous work per frame to visibly stutter the whole game,
+    -- not just the addon. Waiting for a short pause in typing means one
+    -- rebuild instead of one per character typed.
+    local ROSTER_SEARCH_DEBOUNCE_SECONDS = 0.15
+    local rosterSearchGeneration = 0
+    rosterSearchBox:SetScript("OnTextChanged", function()
+        rosterSearchGeneration = rosterSearchGeneration + 1
+        local thisGeneration = rosterSearchGeneration
+        C_Timer.After(ROSTER_SEARCH_DEBOUNCE_SECONDS, function()
+            if thisGeneration == rosterSearchGeneration then
+                RebuildRoster()
+            end
+        end)
+    end)
 
     -- Profession filter row — roster only (level 1). Plain clickable text,
     -- not buttons: normal color when off, a highlight color when toggled
@@ -714,9 +730,9 @@ local function BuildOverviewPage(parent)
 
     -- "Engineering 375", or "Engineering 375 (no data)" when we know the
     -- skill level (via C_Club) but have no export telling us what they can
-    -- actually craft. Secondary professions (Cooking, First Aid) never get a
-    -- level here — C_Club only reports the two primary-profession slots —
-    -- so those just show the name.
+    -- actually craft. Secondary professions (Cooking) never get a level
+    -- here — C_Club only reports the two primary-profession slots — so
+    -- those just show the name.
     local function FormatProfessionTag(s)
         local tag = s.profession
         if s.rank then
@@ -916,6 +932,153 @@ local function BuildOverviewPage(parent)
         activeProfessionFilters = {}
         UpdateFilterLabelStyles()
         ShowRoster()
+    end
+
+    return page
+end
+
+-----------------------------
+-- SETTINGS PAGE --
+-----------------------------
+
+local function BuildSettingsPage(parent)
+    local page = CreateFrame("Frame", nil, parent)
+    page:SetAllPoints()
+
+    local title = page:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    title:SetPoint("TOPLEFT", 4, -4)
+    title:SetText("Settings")
+
+    local minimapCheck = CreateFrame("CheckButton", nil, page, "UICheckButtonTemplate")
+    minimapCheck:SetSize(20, 20)
+    minimapCheck:SetPoint("TOPLEFT", title, "BOTTOMLEFT", -2, -12)
+
+    local minimapLabel = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    minimapLabel:SetPoint("LEFT", minimapCheck, "RIGHT", 2, 0)
+    minimapLabel:SetText("Show minimap icon")
+
+    minimapCheck:SetScript("OnClick", function(self)
+        -- GT.ToggleMinimapButton flips and returns the new shown state —
+        -- always resync the checkbox to that return value rather than
+        -- trusting self:GetChecked(), so it can't drift if the toggle
+        -- itself is ever called from somewhere else (e.g. a future slash
+        -- command).
+        local shown = GT.ToggleMinimapButton()
+        self:SetChecked(shown)
+    end)
+
+    -- P2P sync tuning — see GetResendIntervalSeconds in P2PSync.lua.
+    local p2pHeader = page:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    p2pHeader:SetPoint("TOPLEFT", minimapCheck, "BOTTOMLEFT", 2, -16)
+    p2pHeader:SetText("P2P recipe sync")
+
+    local p2pHint = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    p2pHint:SetPoint("TOPLEFT", p2pHeader, "BOTTOMLEFT", 0, -4)
+    p2pHint:SetPoint("RIGHT", page, "RIGHT", -12, 0)
+    p2pHint:SetJustifyH("LEFT")
+    p2pHint:SetText(
+        "Your character tells the guild what recipes it knows every so often, "
+        .. "so new players running this addon can discover you automatically "
+        .. "— no exporting or importing needed."
+    )
+
+    -- label + hint (wrapped) + number box, one full row. Returns the box
+    -- (for Commit's setValue call) and its bottom edge (for the next row's
+    -- anchor) — a plain number with no explanation was the whole
+    -- complaint this replaced, so the "why" line is not optional here.
+    local function AddNumberSetting(labelText, hintText, anchor, getValue, setValue)
+        local label = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        label:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -14)
+        label:SetText(labelText)
+
+        local hint = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        hint:SetPoint("TOPLEFT", label, "BOTTOMLEFT", 0, -2)
+        hint:SetPoint("RIGHT", page, "RIGHT", -12, 0)
+        hint:SetJustifyH("LEFT")
+        hint:SetText(hintText)
+
+        local box = CreateFrame("EditBox", nil, page, "InputBoxTemplate")
+        box:SetSize(50, 20)
+        box:SetNumeric(true)
+        box:SetAutoFocus(false)
+        box:SetPoint("TOPLEFT", hint, "BOTTOMLEFT", 2, -6)
+
+        local function Commit()
+            setValue(box:GetNumber())
+            box:SetText(tostring(getValue()))
+            box:ClearFocus()
+        end
+        box:SetScript("OnEnterPressed", Commit)
+        box:SetScript("OnEditFocusLost", Commit)
+
+        box.Refresh = function() box:SetText(tostring(getValue())) end
+        return box
+    end
+
+    local announceIntervalBox = AddNumberSetting(
+        "Announce interval (hours)",
+        "How often you re-tell the guild your known recipes, while you're"
+            .. " below the peer count threshold set below. Default: 24.",
+        p2pHint,
+        function() return GT.GetP2PSettings().announceIntervalHours end,
+        GT.SetP2PAnnounceIntervalHours
+    )
+
+    local peerThresholdBox = AddNumberSetting(
+        "Slow down after this many peers know you",
+        "Once this many guildmates already have your data, announcements"
+            .. " space out 3x further — the point is helping new people find"
+            .. " you, not repeating yourself to people who already know."
+            .. " Default: 10.",
+        announceIntervalBox,
+        function() return GT.GetP2PSettings().peerThreshold end,
+        GT.SetP2PPeerThreshold
+    )
+
+    -- Live readout: turns the two abstract numbers above into a concrete
+    -- "here's what that means right now" sentence.
+    local effectiveStatus = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    effectiveStatus:SetPoint("TOPLEFT", peerThresholdBox, "BOTTOMLEFT", -2, -14)
+    effectiveStatus:SetPoint("RIGHT", page, "RIGHT", -12, 0)
+    effectiveStatus:SetJustifyH("LEFT")
+    effectiveStatus:SetTextColor(0.6, 0.6, 0.6)
+
+    local function RefreshEffectiveStatus()
+        effectiveStatus:SetText(("Right now: you know %d peer(s) — announcing every %dh."):format(
+            GT.CountKnownPeers(),
+            GT.GetEffectiveAnnounceIntervalHours()
+        ))
+    end
+
+    -- Manual peer cleanup — GT.PruneDepartedPeers also runs automatically
+    -- off GUILD_ROSTER_UPDATE (Core.lua), this is just an on-demand nudge
+    -- plus a fresh server roster request before it runs.
+    local pruneBtn = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+    pruneBtn:SetSize(190, 22)
+    pruneBtn:SetPoint("TOPLEFT", effectiveStatus, "BOTTOMLEFT", 2, -10)
+    pruneBtn:SetText("Refresh roster / clean up peers")
+
+    local pruneHint = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    pruneHint:SetPoint("TOPLEFT", pruneBtn, "BOTTOMLEFT", 2, -6)
+    pruneHint:SetPoint("RIGHT", page, "RIGHT", -12, 0)
+    pruneHint:SetJustifyH("LEFT")
+    pruneHint:SetText("Asks the server for the current guild member list and removes any cached peer who's no longer in the guild. Happens automatically too, this is just an on-demand check.")
+
+    local pruneStatus = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    pruneStatus:SetPoint("TOPLEFT", pruneHint, "BOTTOMLEFT", 0, -6)
+
+    pruneBtn:SetScript("OnClick", function()
+        local removed = GT.RefreshGuildRosterAndPrunePeers()
+        pruneStatus:SetText(("Removed %d peer(s) no longer in the guild."):format(removed))
+        RefreshEffectiveStatus()
+    end)
+
+    page.Refresh = function()
+        minimapCheck:SetChecked(not GuildThingDB.minimap.hide)
+        announceIntervalBox.Refresh()
+        peerThresholdBox.Refresh()
+        RefreshEffectiveStatus()
+        pruneStatus:SetText("")
     end
 
     return page
@@ -1122,15 +1285,22 @@ local function CreateGTFrame()
         previousAnchor = btn
     end
 
-    -- Settings section — Import/Export always lives here; Debug only if
-    -- GT.DEBUG_UI_ENABLED (Debug.lua) is manually flipped on.
-    local settingsHeader = sidebar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    settingsHeader:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", 8, -10)
-    settingsHeader:SetTextColor(0.6, 0.6, 0.6)
-    settingsHeader:SetText("Settings")
+    -- Options section — Settings and Import/Export always live here; Debug
+    -- only if GT.DEBUG_UI_ENABLED (Debug.lua) is manually flipped on.
+    local optionsHeader = sidebar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    optionsHeader:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", 8, -10)
+    optionsHeader:SetTextColor(0.6, 0.6, 0.6)
+    optionsHeader:SetText("Options")
+
+    local settingsBtn = CreateSidebarButton(sidebar)
+    settingsBtn:SetPoint("TOPLEFT", optionsHeader, "BOTTOMLEFT", -8, -4)
+    settingsBtn:SetPoint("RIGHT", sidebar, "RIGHT", 0, 0)
+    settingsBtn.label:SetText("Settings")
+    table.insert(sidebarButtons, settingsBtn)
+    previousAnchor = settingsBtn
 
     local importExportBtn = CreateSidebarButton(sidebar)
-    importExportBtn:SetPoint("TOPLEFT", settingsHeader, "BOTTOMLEFT", -8, -4)
+    importExportBtn:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", 0, -4)
     importExportBtn:SetPoint("RIGHT", sidebar, "RIGHT", 0, 0)
     importExportBtn.label:SetText("Import / Export")
     table.insert(sidebarButtons, importExportBtn)
@@ -1153,6 +1323,7 @@ local function CreateGTFrame()
     local importExportPage = BuildImportExportPage(content)
     local professionPage = BuildProfessionPage(content)
     local overviewPage = BuildOverviewPage(content)
+    local settingsPage = BuildSettingsPage(content)
     local debugPage = GT.DEBUG_UI_ENABLED and BuildDebugPage(content) or nil
 
     local function SelectSidebar(selectedBtn)
@@ -1166,9 +1337,16 @@ local function CreateGTFrame()
         importExportPage:Hide()
         professionPage:Hide()
         overviewPage:Hide()
+        settingsPage:Hide()
         if debugPage then debugPage:Hide() end
         page:Show()
     end
+
+    settingsBtn:SetScript("OnClick", function()
+        SelectSidebar(settingsBtn)
+        ShowPage(settingsPage)
+        settingsPage.Refresh()
+    end)
 
     importExportBtn:SetScript("OnClick", function()
         SelectSidebar(importExportBtn)

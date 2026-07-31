@@ -33,8 +33,12 @@ local GT = GuildThing
 
 -- 1. BROADCAST — on login, or when own recipes changed, compress own
 --    known recipes and send to guild chat. Skip if unchanged and sent
---    recently (24h, longer once knownPeers has ~10 people). This is
---    mainly for onboarding new people, not for freshness.
+--    recently (user-configurable announceIntervalHours, 24h default;
+--    multiplied by SLOWDOWN_FACTOR once knownPeers reaches
+--    peerThreshold, also user-configurable, 10 default — see
+--    GetP2PSettings/GetResendIntervalSeconds below). This is mainly for
+--    onboarding new people, not for freshness — once most of the guild
+--    already knows you, broadcasting every day forever is just noise.
 
 -- 2. RECEIVE — rebuild the compressed data, save it, add sender to
 --    knownPeers. We fill in the new recipes, never overwrite, so we
@@ -63,8 +67,62 @@ local GT = GuildThing
 
 local ADDON_PREFIX = "GT_RECIPES"
 local CHUNK_BODY_LIMIT = 230 -- addon messages cap at 255 chars; header eats ~16-25
-local RESEND_INTERVAL_SECONDS = 24 * 60 * 60
 local SEQ_WRAP = 100
+
+-----------------------------
+-- P2P SETTINGS (user-configurable) --
+-----------------------------
+-- Once knownPeers reaches peerThreshold, the announce interval is
+-- multiplied by this — broadcasting is for onboarding people who don't
+-- know you yet, not for freshness (that's the gossip handshake's job), so
+-- once most of the guild already knows you there's diminishing value in
+-- still broadcasting every announceIntervalHours forever. Not itself a
+-- user setting — two knobs (threshold + interval) is already enough to
+-- reason about without also configuring the slowdown multiplier.
+local SLOWDOWN_FACTOR = 3
+
+local function GetP2PSettings()
+	GuildThingDB.p2pSettings = GuildThingDB.p2pSettings or {}
+	local settings = GuildThingDB.p2pSettings
+	settings.peerThreshold = settings.peerThreshold or 10
+	settings.announceIntervalHours = settings.announceIntervalHours or 24
+	return settings
+end
+GT.GetP2PSettings = GetP2PSettings
+
+function GT.SetP2PPeerThreshold(n)
+	GetP2PSettings().peerThreshold = math.max(1, tonumber(n) or 10)
+end
+
+function GT.SetP2PAnnounceIntervalHours(n)
+	GetP2PSettings().announceIntervalHours = math.max(1, tonumber(n) or 24)
+end
+
+local function CountKnownPeers()
+	local count = 0
+	for _ in pairs(GuildThingDB.P2PData or {}) do
+		count = count + 1
+	end
+	return count
+end
+
+local function GetResendIntervalSeconds()
+	local settings = GetP2PSettings()
+	local seconds = settings.announceIntervalHours * 3600
+	if CountKnownPeers() >= settings.peerThreshold then
+		seconds = seconds * SLOWDOWN_FACTOR
+	end
+	return seconds
+end
+
+-- Settings-page live preview: current peer count and what interval that
+-- actually works out to right now, so the two raw numbers aren't the only
+-- thing a user has to reason about.
+GT.CountKnownPeers = CountKnownPeers
+
+function GT.GetEffectiveAnnounceIntervalHours()
+	return GetResendIntervalSeconds() / 3600
+end
 
 -----------------------------
 -- REVERSE CATALOG INDEX --
@@ -176,7 +234,7 @@ local function TryBroadcastSelfRecipes(force)
 	local entry = GuildThingDB[key]
 
 	local unchanged = entry.p2pLastSentSignature == signature
-	local recentlySent = entry.p2pLastSentAt and (time() - entry.p2pLastSentAt) < RESEND_INTERVAL_SECONDS
+	local recentlySent = entry.p2pLastSentAt and (time() - entry.p2pLastSentAt) < GetResendIntervalSeconds()
 	if not force and unchanged and recentlySent then
 		return
 	end
@@ -358,21 +416,25 @@ local function PickGossipPartner()
 	return candidates[math.random(#candidates)]
 end
 
-local function TryGossipHandshake()
-	if not IsInGuild() then
-		return
-	end
-
-	-- GetGuildRosterInfo can serve stale/empty data until something has
-	-- requested a refresh this session — kick one every round so
-	-- IsGuildMemberOnline isn't working off a roster from before login.
-	-- The refresh call moved to C_GuildInfo at some point; global
-	-- GuildRoster() no longer exists on this client.
+-- GetGuildRosterInfo can serve stale/empty data until something has
+-- requested a refresh this session. The refresh call moved to C_GuildInfo
+-- at some point; global GuildRoster() no longer exists on this client.
+local function RequestGuildRosterRefresh()
 	if C_GuildInfo and C_GuildInfo.GuildRoster then
 		C_GuildInfo.GuildRoster()
 	elseif GuildRoster then
 		GuildRoster()
 	end
+end
+
+local function TryGossipHandshake()
+	if not IsInGuild() then
+		return
+	end
+
+	-- Kick a refresh every round so IsGuildMemberOnline isn't working off
+	-- a roster from before login.
+	RequestGuildRosterRefresh()
 
 	local partner = PickGossipPartner()
 	if not partner then
@@ -525,6 +587,7 @@ local function HandleCompletePayload(senderName, blob)
 		recipeNames = recipeNames,
 		receivedAt = time(),
 	}
+	GT.InvalidateProfessionSummaryCacheFor(subjectName, GetRealmName())
 end
 
 -- Buffers chunks per sender until all of them have arrived, then hands
@@ -594,6 +657,45 @@ local function OnAddonMessage(prefix, message, channel, sender)
 		pendingChunks[senderName] = nil
 		HandleCompletePayload(senderName, table.concat(parts))
 	end
+end
+
+-----------------------------
+-- PEER GC (departed members) --
+-----------------------------
+-- P2PData never removes an entry on its own — someone who leaves the
+-- guild would otherwise stay cached (and keep showing up in the Overview
+-- roster/crafters lookups) forever. Runs automatically off the same
+-- GUILD_ROSTER_UPDATE signal Core.lua's ScanGuildClubProfessions already
+-- reacts to (see the hook there) — no separate polling timer needed, it
+-- piggybacks on guild roster churn the addon was already watching for.
+-- Also callable directly (Settings button) for an on-demand check.
+function GT.PruneDepartedPeers()
+	local data = GuildThingDB.P2PData
+	if not data then
+		return 0
+	end
+
+	local removed = 0
+	for key, entry in pairs(data) do
+		if not IsGuildMember(entry.name) then
+			data[key] = nil
+			GT.InvalidateProfessionSummaryCacheFor(entry.name, entry.realm)
+			removed = removed + 1
+		end
+	end
+	return removed
+end
+
+-- Settings-page button: request a fresh roster from the server AND prune
+-- immediately against whatever roster data we have right now. The request
+-- is async (server round-trip), so this can't wait for the freshest
+-- possible answer before pruning — but the automatic GUILD_ROSTER_UPDATE
+-- hook above catches up moments later once the server actually responds,
+-- so nothing is missed, just possibly caught one event later than an
+-- instant click-to-result would suggest.
+function GT.RefreshGuildRosterAndPrunePeers()
+	RequestGuildRosterRefresh()
+	return GT.PruneDepartedPeers()
 end
 
 -----------------------------
