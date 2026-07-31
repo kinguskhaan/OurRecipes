@@ -366,7 +366,13 @@ local function TryGossipHandshake()
 	-- GetGuildRosterInfo can serve stale/empty data until something has
 	-- requested a refresh this session — kick one every round so
 	-- IsGuildMemberOnline isn't working off a roster from before login.
-	GuildRoster()
+	-- The refresh call moved to C_GuildInfo at some point; global
+	-- GuildRoster() no longer exists on this client.
+	if C_GuildInfo and C_GuildInfo.GuildRoster then
+		C_GuildInfo.GuildRoster()
+	elseif GuildRoster then
+		GuildRoster()
+	end
 
 	local partner = PickGossipPartner()
 	if not partner then
