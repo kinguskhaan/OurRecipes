@@ -23,14 +23,50 @@ icon:SetSize(18, 18)
 icon:SetTexture(ICON)
 icon:SetPoint("CENTER", 0, 1)
 
+-- Which quadrants GetMinimapShape() renders round vs square-cornered.
+-- Mirrors LibDBIcon-1.0's table so our button clips to the same edge
+-- ElvUI/other square-minimap addons draw, instead of always orbiting a circle.
+local minimapShapes = {
+    ["ROUND"] = {true, true, true, true},
+    ["SQUARE"] = {false, false, false, false},
+    ["CORNER-TOPLEFT"] = {false, false, false, true},
+    ["CORNER-TOPRIGHT"] = {false, false, true, false},
+    ["CORNER-BOTTOMLEFT"] = {false, true, false, false},
+    ["CORNER-BOTTOMRIGHT"] = {true, false, false, false},
+    ["SIDE-LEFT"] = {false, true, false, true},
+    ["SIDE-RIGHT"] = {true, false, true, false},
+    ["SIDE-TOP"] = {false, false, true, true},
+    ["SIDE-BOTTOM"] = {true, true, false, false},
+    ["TRICORNER-TOPLEFT"] = {false, true, true, true},
+    ["TRICORNER-TOPRIGHT"] = {true, false, true, true},
+    ["TRICORNER-BOTTOMLEFT"] = {true, true, false, true},
+    ["TRICORNER-BOTTOMRIGHT"] = {true, true, true, false},
+}
+
 local function UpdatePosition()
     local angle = math.rad(mmDB.angle or 220)
-    local radius = 80
+    local edgeBuffer = 5
+    local x, y = -math.cos(angle), math.sin(angle)
+
+    local minimapShape = GetMinimapShape and GetMinimapShape() or "ROUND"
+    local quadTable = minimapShapes[minimapShape]
+    local q = 1
+    if x < 0 then q = q + 1 end
+    if y > 0 then q = q + 2 end
+
+    local w = (Minimap:GetWidth() / 2) + edgeBuffer
+    local h = (Minimap:GetHeight() / 2) + edgeBuffer
+    if quadTable[q] then
+        x, y = x * w, y * h
+    else
+        local diagRadiusW = math.sqrt(2 * w ^ 2) - 10
+        local diagRadiusH = math.sqrt(2 * h ^ 2) - 10
+        x = math.max(-w, math.min(x * diagRadiusW, w))
+        y = math.max(-h, math.min(y * diagRadiusH, h))
+    end
+
     button:ClearAllPoints()
-    button:SetPoint(
-        "CENTER", Minimap, "CENTER",
-        -radius * math.cos(angle), radius * math.sin(angle)
-    )
+    button:SetPoint("CENTER", Minimap, "CENTER", x, y)
 end
 
 button:SetScript("OnDragStart", function(self)
