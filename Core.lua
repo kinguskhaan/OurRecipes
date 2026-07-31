@@ -74,6 +74,7 @@ function GT.SaveProfession(skillName, recipes)
 
     entry.professions[skillName] = merged
     entry.lastUpdate = time()
+    GT.InvalidateProfessionSummaryCacheFor(entry.name, entry.realm)
 end
 
 -----------------------------------
@@ -185,6 +186,18 @@ function GT.GetP2PEntry(name, realm)
     return data and data[GT.ClubScanKey(name, realm)]
 end
 
+-- True if two ClubScan .professions tables (at most 2 entries — the two
+-- primary-profession slots) hold the same profession->rank pairs.
+local function ProfessionRanksEqual(a, b)
+    for profName, rank in pairs(a) do
+        if b[profName] ~= rank then return false end
+    end
+    for profName, rank in pairs(b) do
+        if a[profName] ~= rank then return false end
+    end
+    return true
+end
+
 local function ScanGuildClubProfessions()
     if not C_Club or not IsInGuild() then return end
     local clubId = C_Club.GetGuildClubId and C_Club.GetGuildClubId()
@@ -196,6 +209,7 @@ local function ScanGuildClubProfessions()
     -- Classic guilds are single-realm (no cross-realm guilds under this
     -- ruleset), so every member shares the scanning player's realm.
     local realm = GetRealmName()
+    local oldScan = GuildThingDB.ClubScan or {}
     local scan = {}
 
     for _, memberId in ipairs(members) do
@@ -226,13 +240,38 @@ local function ScanGuildClubProfessions()
         end
     end
 
+    -- GUILD_ROSTER_UPDATE (this function's trigger) fires on ordinary guild
+    -- churn — members logging on/off, officer notes changing — far more
+    -- often than anyone's actual profession/rank changes. Only invalidate
+    -- the cached summary for characters whose scanned data actually moved,
+    -- not the whole guild, every single time.
+    for key, newEntry in pairs(scan) do
+        local oldEntry = oldScan[key]
+        if not oldEntry or not ProfessionRanksEqual(oldEntry.professions, newEntry.professions) then
+            GT.InvalidateProfessionSummaryCacheFor(newEntry.name, newEntry.realm)
+        end
+    end
+    for key, oldEntry in pairs(oldScan) do
+        if not scan[key] then
+            GT.InvalidateProfessionSummaryCacheFor(oldEntry.name, oldEntry.realm)
+        end
+    end
+
     GuildThingDB.ClubScan = scan
 end
 
 local clubScanFrame = CreateFrame("Frame")
 clubScanFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
 clubScanFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
-clubScanFrame:SetScript("OnEvent", ScanGuildClubProfessions)
+clubScanFrame:SetScript("OnEvent", function()
+    ScanGuildClubProfessions()
+    -- Same signal doubles as "guild membership may have changed" for the
+    -- P2P peer cache — piggyback here instead of a separate polling timer
+    -- (GT.PruneDepartedPeers is defined in P2PSync.lua, which loads after
+    -- this file, but by the time this event actually fires at runtime
+    -- every file has already loaded).
+    GT.PruneDepartedPeers()
+end)
 
 -----------------------------
 -- EXPORT REMINDER --
@@ -561,7 +600,39 @@ end
 --   - rank is set (C_Club roster scan says they have that primary profession)
 -- rank without recipe data means "we know they have the profession, but not
 -- what they can craft" — the UI surfaces that gap instead of hiding it.
+-- Keyed by ClubScanKey(name, realm). GetCharacterProfessionSummary below
+-- walks the whole ~2170-recipe catalog per character it's asked about —
+-- fine once, but the Overview roster (UI.lua) calls it for EVERY member on
+-- every rebuild, including every roster search keystroke (debounced, but
+-- even one guild-size x catalog-size pass synchronously on the UI thread
+-- is enough to visibly stutter the whole game).
+--
+-- Invalidation is per-character (InvalidateProfessionSummaryCacheFor),
+-- not wholesale — GUILD_ROSTER_UPDATE (which ScanGuildClubProfessions
+-- reacts to) fires on ordinary guild churn (members logging on/off, notes
+-- changing) far more often than anyone's actual profession data changes,
+-- so wiping everything on every one of those defeated the cache almost
+-- entirely for anyone with Overview search open in an active guild.
+-- InvalidateProfessionSummaryCache (wholesale) is kept for ImportGuildData,
+-- the one path that can plausibly touch most of the roster at once and
+-- isn't a hot path anyway (a deliberate, rare user action).
+local professionSummaryCache = {}
+
+function GT.InvalidateProfessionSummaryCache()
+    professionSummaryCache = {}
+end
+
+function GT.InvalidateProfessionSummaryCacheFor(name, realm)
+    professionSummaryCache[GT.ClubScanKey(name, realm)] = nil
+end
+
 function GT.GetCharacterProfessionSummary(name, realm)
+    local key = GT.ClubScanKey(name, realm)
+    local cached = professionSummaryCache[key]
+    if cached then
+        return cached
+    end
+
     local clubEntry = GT.GetClubScanEntry(name, realm)
     local knownNames = GetKnownRecipeNames(name, realm)
     local summary = {}
@@ -577,6 +648,8 @@ function GT.GetCharacterProfessionSummary(name, realm)
             table.insert(summary, { profession = profName, count = count, rank = rank })
         end
     end
+
+    professionSummaryCache[key] = summary
     return summary
 end
 

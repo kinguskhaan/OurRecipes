@@ -75,6 +75,7 @@ function GT.ImportGuildData(str)
         recipeNamesByCharIndex = recipeNamesByCharIndex,
         characterIndexByKey = characterIndexByKey,
     }
+    GT.InvalidateProfessionSummaryCache()
 
     return true
 end
