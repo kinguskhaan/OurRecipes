@@ -12,4 +12,5 @@ Data/Recipes.lua
 Core.lua
 GuildData.lua
 P2PSync.lua
+Debug.lua
 UI.lua

@@ -158,7 +158,8 @@ end
 -- Throttle state lives in GuildThingDB alongside the other per-character
 -- fields (entry.professions, entry.lastImport) — signature is just the
 -- sorted, comma-joined spellID list, cheap to compare as a plain string.
-local function TryBroadcastSelfRecipes()
+-- force (GT.DebugForceBroadcast) skips the throttle entirely.
+local function TryBroadcastSelfRecipes(force)
 	if not IsInGuild() then
 		return
 	end
@@ -176,7 +177,7 @@ local function TryBroadcastSelfRecipes()
 
 	local unchanged = entry.p2pLastSentSignature == signature
 	local recentlySent = entry.p2pLastSentAt and (time() - entry.p2pLastSentAt) < RESEND_INTERVAL_SECONDS
-	if unchanged and recentlySent then
+	if not force and unchanged and recentlySent then
 		return
 	end
 
@@ -610,5 +611,50 @@ end)
 -- Re-check the throttle whenever a fresh scan completes too (not just on
 -- login) — hooking GT.SaveProfession rather than the TRADE_SKILL_UPDATE
 -- events directly since that's the single choke point both ScanTradeSkill
--- and ScanCraft already funnel through.
-hooksecurefunc(GT, "SaveProfession", TryBroadcastSelfRecipes)
+-- and ScanCraft already funnel through. Wrapped so SaveProfession's own
+-- (skillName, recipes) arguments never get passed through as our force
+-- parameter — hooksecurefunc forwards the hooked call's original args.
+hooksecurefunc(GT, "SaveProfession", function()
+	TryBroadcastSelfRecipes()
+end)
+
+-----------------------------
+-- DEBUG HOOKS --
+-----------------------------
+-- Thin wrappers so /gt debug (Debug.lua) can exercise this file's
+-- internals without a second account/client online — everything above
+-- is guild-chat/whisper based and otherwise hard to test solo.
+function GT.DebugForceBroadcast()
+	TryBroadcastSelfRecipes(true)
+end
+
+function GT.DebugForceGossip(targetName)
+	ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, "SYN:" .. BuildCombinedHash(), "WHISPER", targetName)
+end
+
+function GT.DebugSimulateMessage(senderName, message, channel)
+	OnAddonMessage(ADDON_PREFIX, message, channel or "GUILD", senderName)
+end
+
+-- Builds a real chunked broadcast for a single recipe name (looked up
+-- via recipeNameToSpellID) and feeds it through OnAddonMessage as if
+-- fakeName had sent it — exercises the actual encode/chunk/decode
+-- pipeline, not just a hand-typed message string.
+function GT.DebugFakeRecipeBroadcast(fakeName, recipeName, class)
+	local id = recipeNameToSpellID[recipeName]
+	if not id then
+		print("|cffff0000[GuildThing debug]|r unknown recipe name: " .. tostring(recipeName))
+		return
+	end
+
+	local chunks = ChunksFromIDs({ id }, class or "WARRIOR")
+	if not chunks then
+		return
+	end
+
+	local total = #chunks
+	for i, chunk in ipairs(chunks) do
+		local header = string.format("%d:%d:%d:", 1, i, total)
+		OnAddonMessage(ADDON_PREFIX, header .. chunk, "GUILD", fakeName)
+	end
+end

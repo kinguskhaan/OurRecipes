@@ -1031,4 +1031,11 @@ end
 
 SLASH_GUILDTHING1 = "/gt"
 SLASH_GUILDTHING2 = "/guildthing"
-SlashCmdList["GUILDTHING"] = ToggleGTFrame
+SlashCmdList["GUILDTHING"] = function(msg)
+	local debugArgs = (msg or ""):match("^debug%s*(.-)%s*$")
+	if debugArgs then
+		GT.HandleDebugCommand(debugArgs)
+		return
+	end
+	ToggleGTFrame()
+end
