@@ -12,9 +12,13 @@ Drop the addon folder into `Interface/AddOns/`.
 
 `/or` or `/ourrecipes` to open the window.
 
-Open a profession window in-game to scan your own known recipes automatically. From there it's automatic: your character periodically tells the guild what it knows over addon chat messages, and picks up everyone else's the same way — no exporting or importing needed for anyone else running the addon. Tune how chatty that sync is (or turn the minimap icon on/off) from the Settings tab.
+Open a profession window once and the addon will automatically pick up your known recipes. After that it will sync recipes with other guildies using the addon in the background over time, sharing what you know and learning from others.
 
-The Import/Export tab is still there for a one-off full snapshot — handy for guildmates who don't run the addon, or if you just want a backup — but it's optional now.
+There's also an optional manual import/export tab if you wish to share your data manually via 3rd party apps, or take backup snaposhots. Handy for sharing over discord for example or with friends that's not in your guild.
+
+## Our Planned Features
+
+- Optional sync with addon users outside your guild.
 
 ## Our Contributors
 
