@@ -150,9 +150,6 @@ end)
 -----------------------------------
 -- GUILD ROSTER SCAN (C_CLUB) --
 -----------------------------------
--- Automatic, no export needed — same mechanism Guild Roster Manager uses.
--- Gives profession + skill LEVEL for the whole guild; never recipe-level
--- detail (see the comment below on PRIMARY_PROFESSION_ID_TO_NAME for why).
 
 -- Blizzard's guild roster (C_Club, guilds are "clubs" under the hood) hands
 -- out every member's primary-profession skill level for free, no addon or

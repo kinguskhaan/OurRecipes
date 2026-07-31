@@ -4,12 +4,13 @@ local GT = GuildThing
 -- Gargul's SoftRes import) and stores it in GuildThingDB.GuildData. Returns
 -- true on success, or false plus a human-readable error message.
 --
--- Expected JSON shape (see addon/GuildThing/EXPORT_PLAN.md):
+-- Expected JSON shape — matching only matters on recipe.name and
+-- recipe.chars below, everything else is carried through as-is:
 -- {
 --   guild = "GuildName-Realm",
 --   exportedAt = 1234567890,
 --   characters = { { name = "...", realm = "...", class = "..." }, ... },
---   recipes = { { name = "...", spellId = ..., itemId = ..., chars = { 0, 3, 7 } }, ... },
+--   recipes = { { name = "...", chars = { 0, 3, 7 } }, ... },
 -- }
 function GT.ImportGuildData(str)
     str = (str or ""):gsub("%s+", "")

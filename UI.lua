@@ -394,14 +394,15 @@ local function BuildProfessionPage(parent)
     return page
 end
 
--- Simpler row for the Overview drill-down (roster / per-character
--- profession list / per-character recipe list) — no crafters tooltip like
--- CreateProfessionRow, just an optional icon + name + right-aligned subtext.
 -----------------------------
 -- OVERVIEW PAGE --
 -----------------------------
 -- Browse the whole guild roster, drilling down into any character's
 -- professions and known recipes.
+
+-- Simpler row for the Overview drill-down (roster / per-character
+-- profession list / per-character recipe list) — no crafters tooltip like
+-- CreateProfessionRow, just an optional icon + name + right-aligned subtext.
 
 local function CreateOverviewRow(parent)
     local row = CreateFrame("Button", nil, parent)
@@ -1006,7 +1007,7 @@ local function CreateGTFrame()
     end)
 
     -- Frames are shown by default on creation; without this the very first
-    -- `/gt` would create-then-immediately-hide (ToggleGTFrame sees it as
+    -- `/or` would create-then-immediately-hide (ToggleGTFrame sees it as
     -- already shown and hides it), needing a second press to actually open.
     f:Hide()
 

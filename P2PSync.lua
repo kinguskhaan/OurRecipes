@@ -64,7 +64,7 @@ local GT = GuildThing
 local ADDON_PREFIX = "GT_RECIPES"
 local CHUNK_BODY_LIMIT = 230 -- addon messages cap at 255 chars; header eats ~16-25
 local RESEND_INTERVAL_SECONDS = 24 * 60 * 60
-local SEQ_WRAP = 100 -- seq is a single-digit-friendly rolling counter, not a unique ID
+local SEQ_WRAP = 100
 
 -----------------------------
 -- REVERSE CATALOG INDEX --
