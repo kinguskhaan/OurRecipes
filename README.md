@@ -14,7 +14,7 @@ Drop the addon folder into `Interface/AddOns/`.
 
 Open a profession window once and the addon will automatically pick up your known recipes. After that it will sync recipes with other guildies using the addon in the background over time, sharing what you know and learning from others.
 
-There's also an optional manual import/export tab if you wish to share your data manually via 3rd party apps, or take backup snaposhots. Handy for sharing over discord for example or with friends that's not in your guild.
+There's also an optional manual import/export tab if you wish to share your data manually via 3rd party apps, or take backup snapshots. Handy for sharing over discord for example or with friends that's not in your guild.
 
 ## Our Planned Features
 
