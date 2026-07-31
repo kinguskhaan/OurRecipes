@@ -638,22 +638,39 @@ function GT.DebugForceGossip(targetName)
 	ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, "SYN:" .. BuildCombinedHash(), "WHISPER", targetName)
 end
 
+-- Exposes the otherwise-local BuildCombinedHash so a debug SYN can be
+-- hand-built to deliberately match (or not) — the only way to solo-test
+-- both branches of OnSyn.
+function GT.DebugGetCombinedHash()
+	return BuildCombinedHash()
+end
+
 function GT.DebugSimulateMessage(senderName, message, channel)
 	OnAddonMessage(ADDON_PREFIX, message, channel or "GUILD", senderName)
 end
 
--- Builds a real chunked broadcast for a single recipe name (looked up
--- via recipeNameToSpellID) and feeds it through OnAddonMessage as if
--- fakeName had sent it — exercises the actual encode/chunk/decode
--- pipeline, not just a hand-typed message string.
-function GT.DebugFakeRecipeBroadcast(fakeName, recipeName, class)
-	local id = recipeNameToSpellID[recipeName]
-	if not id then
-		print("|cffff0000[GuildThing debug]|r unknown recipe name: " .. tostring(recipeName))
+-- Builds a real chunked broadcast for one or more comma-separated recipe
+-- names (looked up via recipeNameToSpellID) and feeds it through
+-- OnAddonMessage as if fakeName had sent it — exercises the actual
+-- encode/chunk/decode pipeline, not just a hand-typed message string.
+-- Enough recipe names pushes the encoded blob past CHUNK_BODY_LIMIT,
+-- the only way to solo-test multi-chunk reassembly.
+function GT.DebugFakeRecipeBroadcast(fakeName, recipeNamesStr, class)
+	local ids = {}
+	for rawName in recipeNamesStr:gmatch("[^,]+") do
+		local recipeName = rawName:match("^%s*(.-)%s*$")
+		local id = recipeNameToSpellID[recipeName]
+		if id then
+			table.insert(ids, id)
+		else
+			print("|cffff0000[GuildThing debug]|r unknown recipe name: " .. recipeName)
+		end
+	end
+	if #ids == 0 then
 		return
 	end
 
-	local chunks = ChunksFromIDs({ id }, class or "WARRIOR")
+	local chunks = ChunksFromIDs(ids, class or "WARRIOR")
 	if not chunks then
 		return
 	end
