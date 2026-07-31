@@ -7,7 +7,9 @@
 Libs/LibDeflate.lua
 Libs/Base64.lua
 Libs/JSON.lua
+Libs/ChatThrottleLib.lua
 Data/Recipes.lua
 Core.lua
 GuildData.lua
+P2PSync.lua
 UI.lua
