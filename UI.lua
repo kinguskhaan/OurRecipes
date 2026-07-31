@@ -891,7 +891,7 @@ local function CreateGTFrame()
 
     local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     title:SetPoint("TOP", 0, -16)
-    title:SetText("GuildThing")
+    title:SetText("Our Recipes!")
 
     local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", -4, -4)
@@ -1029,8 +1029,10 @@ local function ToggleGTFrame()
     end
 end
 
-SLASH_GUILDTHING1 = "/gt"
-SLASH_GUILDTHING2 = "/guildthing"
+GT.ToggleUI = ToggleGTFrame
+
+SLASH_GUILDTHING1 = "/or"
+SLASH_GUILDTHING2 = "/ourrecipes"
 SlashCmdList["GUILDTHING"] = function(msg)
 	local debugArgs = (msg or ""):match("^debug%s*(.-)%s*$")
 	if debugArgs then
