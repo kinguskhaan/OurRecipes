@@ -380,8 +380,8 @@ end
 -- CRAFTERS LOOKUP --
 -----------------------------
 
--- Who (self and/or imported guildies) can craft the given recipe.
--- Returns a list of { name, realm, class }.
+-- Who (self, P2P-mesh peers, and/or imported guildies) can craft the given
+-- recipe. Returns a list of { name, realm, class }.
 function GT.GetCraftersForRecipe(profName, recipeName)
     local crafters = {}
     local seen = {}
@@ -396,6 +396,12 @@ function GT.GetCraftersForRecipe(profName, recipeName)
     if GT.IsKnownBySelf(profName, recipeName) then
         local entry = GetCharEntry()
         addCrafter(entry.name, entry.realm, entry.class)
+    end
+
+    for _, peer in pairs(GuildThingDB.P2PData or {}) do
+        if peer.recipeNames and peer.recipeNames[recipeName] then
+            addCrafter(peer.name, peer.realm, peer.class)
+        end
     end
 
     local guildData = GuildThingDB.GuildData
@@ -453,47 +459,18 @@ local function IsSelf(name, realm)
         and string.lower(realm or "") == string.lower(entry.realm)
 end
 
--- Does this specific character (self or an imported guildie) know the
--- given recipe? Unlike GetCraftersForRecipe (which lists everyone), this
--- checks one character — used to drive the per-character profession
--- drill-down in the Overview page.
-function GT.CharacterKnowsRecipe(name, realm, profName, recipeName)
-    if IsSelf(name, realm) and GT.IsKnownBySelf(profName, recipeName) then
-        return true
-    end
-
-    local jsIndex = GT.FindGuildDataCharacterIndex(name, realm)
-    if jsIndex == nil then return false end
-
-    local guildData = GuildThingDB.GuildData
-    if not guildData then return false end
-
-    -- O(1) via the reverse index built at import time. Falls back to
-    -- scanning the recipe's char-index array for older saved data.
-    if guildData.recipeNamesByCharIndex then
-        local known = guildData.recipeNamesByCharIndex[jsIndex]
-        return known ~= nil and known[recipeName] == true
-    end
-
-    local charIndices = guildData.recipesByName and guildData.recipesByName[recipeName]
-    if not charIndices then return false end
-
-    for _, idx in ipairs(charIndices) do
-        if idx == jsIndex then return true end
-    end
-    return false
-end
-
 -----------------------------
 -- ROSTER & OVERVIEW --
 -----------------------------
--- Combines all three data sources (self scan, website import, C_Club scan)
--- into what the Overview page actually renders.
+-- Combines all four data sources (self scan, website import, C_Club scan,
+-- P2P mesh) into what the Overview page actually renders.
 
 -- Every character we have any data for — self, everyone from the last
--- guild-data import, AND everyone picked up by the live C_Club roster scan
--- (which needs no export at all) — deduped by name+realm (self wins if also
--- present elsewhere, since IsSelf and Roster keys match the same way).
+-- guild-data import, everyone picked up by the live C_Club roster scan, AND
+-- everyone the P2P mesh has heard from directly (neither of the last two
+-- need an export/import round trip at all) — deduped by name+realm (self
+-- wins if also present elsewhere, since IsSelf and Roster keys match the
+-- same way).
 function GT.GetRoster()
     local roster = {}
     local seen = {}
@@ -519,16 +496,21 @@ function GT.GetRoster()
         addEntry(entry.name, entry.realm, entry.class, false)
     end
 
+    for _, entry in pairs(GuildThingDB.P2PData or {}) do
+        addEntry(entry.name, entry.realm, entry.class, false)
+    end
+
     table.sort(roster, function(a, b) return a.name:lower() < b.name:lower() end)
     return roster
 end
 
--- Every recipe name a character knows, self or imported, as a set — resolved
--- ONCE per character instead of once per catalog recipe. The two functions
--- below used to call CharacterKnowsRecipe (which redoes the self/import
--- lookup from scratch) for every recipe in the ~2000-entry catalog; with a
--- full guild roster via the C_Club scan that's catalog-size x guild-size
--- redundant lookups on every single Overview click, visible as UI lag.
+-- Every recipe name a character knows, self, P2P-mesh, or imported, as a
+-- set — resolved ONCE per character instead of once per catalog recipe
+-- (catalog-size x guild-size redundant lookups per Overview click
+-- otherwise, visible as UI lag). P2P and import are merged (union) rather
+-- than one replacing the other — same "recipes only ever get added"
+-- reasoning as everywhere else this data is combined, so a stale import
+-- can't hide something the live mesh already taught us, or vice versa.
 local function GetKnownRecipeNames(name, realm)
     if IsSelf(name, realm) then
         local set = {}
@@ -540,26 +522,35 @@ local function GetKnownRecipeNames(name, realm)
         return set
     end
 
-    local jsIndex = GT.FindGuildDataCharacterIndex(name, realm)
-    if jsIndex == nil then return {} end
+    local set = {}
 
-    local guildData = GuildThingDB.GuildData
-    if guildData and guildData.recipeNamesByCharIndex then
-        return guildData.recipeNamesByCharIndex[jsIndex] or {}
+    local p2pEntry = GT.GetP2PEntry(name, realm)
+    if p2pEntry then
+        for recipeName in pairs(p2pEntry.recipeNames or {}) do
+            set[recipeName] = true
+        end
     end
 
-    -- Fallback for saved data imported before recipeNamesByCharIndex existed.
-    local set = {}
-    if guildData and guildData.recipesByName then
-        for recipeName, charIndices in pairs(guildData.recipesByName) do
-            for _, idx in ipairs(charIndices) do
-                if idx == jsIndex then
-                    set[recipeName] = true
-                    break
+    local jsIndex = GT.FindGuildDataCharacterIndex(name, realm)
+    if jsIndex ~= nil then
+        local guildData = GuildThingDB.GuildData
+        if guildData and guildData.recipeNamesByCharIndex then
+            for recipeName in pairs(guildData.recipeNamesByCharIndex[jsIndex] or {}) do
+                set[recipeName] = true
+            end
+        elseif guildData and guildData.recipesByName then
+            -- Fallback for saved data imported before recipeNamesByCharIndex existed.
+            for recipeName, charIndices in pairs(guildData.recipesByName) do
+                for _, idx in ipairs(charIndices) do
+                    if idx == jsIndex then
+                        set[recipeName] = true
+                        break
+                    end
                 end
             end
         end
     end
+
     return set
 end
 
