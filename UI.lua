@@ -845,6 +845,104 @@ local function BuildOverviewPage(parent)
 end
 
 -----------------------------
+-- DEBUG PAGE --
+-----------------------------
+-- Only reachable if GT.DEBUG_UI_ENABLED is flipped on in Debug.lua (see
+-- CreateGTFrame below, which gates the sidebar entry on it). Every button
+-- here just forwards a string to GT.HandleDebugCommand — the exact same
+-- entry point /or debug already uses — so a button click is always 1:1
+-- with typing the equivalent command, never a second code path to drift
+-- out of sync with the real thing.
+
+-- First `count` catalog recipes (that resolve to a real spellID) for
+-- profName, comma-joined — same trick as the /run snippet used to solo-test
+-- multi-chunk reassembly without hand-typing dozens of recipe names.
+local function BuildSampleRecipeList(profName, count)
+    local names = {}
+    for _, recipe in ipairs(GT.GetCatalogForProfession(profName)) do
+        if recipe.kind == "spell" then
+            table.insert(names, recipe.name)
+            if #names >= count then break end
+        end
+    end
+    return table.concat(names, ",")
+end
+
+local function BuildDebugPage(parent)
+    local page = CreateFrame("Frame", nil, parent)
+    page:SetAllPoints()
+
+    local title = page:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    title:SetPoint("TOPLEFT", 4, -4)
+    title:SetText("P2P debug tools")
+
+    local hint = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    hint:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
+    hint:SetText("Developer only. Output prints to chat, same as /or debug.")
+
+    local previousAnchor = hint
+    local function AddButton(label, onClick)
+        local btn = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+        btn:SetSize(220, 22)
+        btn:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", 0, -8)
+        btn:SetText(label)
+        btn:SetScript("OnClick", onClick)
+        previousAnchor = btn
+        return btn
+    end
+
+    AddButton("Force broadcast", function()
+        GT.HandleDebugCommand("broadcast")
+    end)
+
+    AddButton("Dump P2PData", function()
+        GT.HandleDebugCommand("dump")
+    end)
+
+    AddButton("Simulate testkingen (2 recipes)", function()
+        GT.HandleDebugCommand("fakerecipe testkingen Adept's Elixir")
+        GT.HandleDebugCommand("fakerecipe testkingen Arcane Elixir")
+    end)
+
+    AddButton("Simulate multi-chunk (40 recipes)", function()
+        local list = BuildSampleRecipeList("Engineering", 40)
+        GT.HandleDebugCommand("fakerecipe multichunktest " .. list)
+    end)
+
+    AddButton("SYN self-hash (same branch)", function()
+        GT.HandleDebugCommand("fakewhisper testkingen SYN:" .. tostring(GT.DebugGetCombinedHash()))
+    end)
+
+    -- Freeform command row — same 255-char chat cap never applies here,
+    -- since this never goes through the chat edit box at all.
+    local cmdLabel = page:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    cmdLabel:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", 0, -16)
+    cmdLabel:SetText("Freeform: /or debug ...")
+
+    local cmdBox = CreateFrame("EditBox", nil, page, "InputBoxTemplate")
+    cmdBox:SetSize(TEXTBOX_WIDTH - 90, 20)
+    cmdBox:SetAutoFocus(false)
+    cmdBox:SetPoint("TOPLEFT", cmdLabel, "BOTTOMLEFT", 8, -8)
+
+    local runBtn = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+    runBtn:SetSize(80, 22)
+    runBtn:SetPoint("LEFT", cmdBox, "RIGHT", 8, 0)
+    runBtn:SetText("Run")
+
+    local function RunCmdBox()
+        local text = cmdBox:GetText()
+        if text and text ~= "" then
+            GT.HandleDebugCommand(text)
+            cmdBox:SetText("")
+        end
+    end
+    runBtn:SetScript("OnClick", RunCmdBox)
+    cmdBox:SetScript("OnEnterPressed", RunCmdBox)
+
+    return page
+end
+
+-----------------------------
 -- MAIN FRAME / CHROME --
 -----------------------------
 -- The window itself: sidebar tabs + the pages built above.
@@ -919,34 +1017,55 @@ local function CreateGTFrame()
 
     local sidebarButtons = {}
 
-    local importExportBtn = CreateSidebarButton(sidebar)
-    importExportBtn:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 0, 0)
-    importExportBtn:SetPoint("RIGHT", sidebar, "RIGHT", 0, 0)
-    importExportBtn.label:SetText("Import / Export")
-    table.insert(sidebarButtons, importExportBtn)
-
-    -- Plain section label, not a button — muted grey so it doesn't read as
-    -- a selectable (or selected) item like the gold GameFontNormal color would.
-    local header = sidebar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    header:SetPoint("TOPLEFT", importExportBtn, "BOTTOMLEFT", 8, -10)
-    header:SetTextColor(0.6, 0.6, 0.6)
-    header:SetText("Professions")
-
     local overviewBtn = CreateSidebarButton(sidebar)
-    overviewBtn:SetPoint("TOPLEFT", header, "BOTTOMLEFT", -8, -4)
+    overviewBtn:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 0, 0)
     overviewBtn:SetPoint("RIGHT", sidebar, "RIGHT", 0, 0)
     overviewBtn.label:SetText("Overview")
     table.insert(sidebarButtons, overviewBtn)
 
-    local previousAnchor = overviewBtn
-    for _, profName in ipairs(GT.GetProfessionOrder()) do
+    -- Plain section label, not a button — muted grey so it doesn't read as
+    -- a selectable (or selected) item like the gold GameFontNormal color would.
+    local header = sidebar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    header:SetPoint("TOPLEFT", overviewBtn, "BOTTOMLEFT", 8, -10)
+    header:SetTextColor(0.6, 0.6, 0.6)
+    header:SetText("Professions")
+
+    local previousAnchor = header
+    for i, profName in ipairs(GT.GetProfessionOrder()) do
         local btn = CreateSidebarButton(sidebar)
-        btn:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", 0, -4)
+        -- First entry under a header sits at x=-8 (compensating the
+        -- header's own +8 inset); every entry after that just chains off
+        -- the previous button at x=0 — same convention used below for
+        -- Settings.
+        btn:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", i == 1 and -8 or 0, -4)
         btn:SetPoint("RIGHT", sidebar, "RIGHT", 0, 0)
         btn.label:SetText(profName)
         btn.profession = profName
         table.insert(sidebarButtons, btn)
         previousAnchor = btn
+    end
+
+    -- Settings section — Import/Export always lives here; Debug only if
+    -- GT.DEBUG_UI_ENABLED (Debug.lua) is manually flipped on.
+    local settingsHeader = sidebar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    settingsHeader:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", 8, -10)
+    settingsHeader:SetTextColor(0.6, 0.6, 0.6)
+    settingsHeader:SetText("Settings")
+
+    local importExportBtn = CreateSidebarButton(sidebar)
+    importExportBtn:SetPoint("TOPLEFT", settingsHeader, "BOTTOMLEFT", -8, -4)
+    importExportBtn:SetPoint("RIGHT", sidebar, "RIGHT", 0, 0)
+    importExportBtn.label:SetText("Import / Export")
+    table.insert(sidebarButtons, importExportBtn)
+    previousAnchor = importExportBtn
+
+    local debugBtn
+    if GT.DEBUG_UI_ENABLED then
+        debugBtn = CreateSidebarButton(sidebar)
+        debugBtn:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", 0, -4)
+        debugBtn:SetPoint("RIGHT", sidebar, "RIGHT", 0, 0)
+        debugBtn.label:SetText("Debug")
+        table.insert(sidebarButtons, debugBtn)
     end
 
     -- Content pane
@@ -957,6 +1076,7 @@ local function CreateGTFrame()
     local importExportPage = BuildImportExportPage(content)
     local professionPage = BuildProfessionPage(content)
     local overviewPage = BuildOverviewPage(content)
+    local debugPage = GT.DEBUG_UI_ENABLED and BuildDebugPage(content) or nil
 
     local function SelectSidebar(selectedBtn)
         for _, btn in ipairs(sidebarButtons) do
@@ -969,6 +1089,7 @@ local function CreateGTFrame()
         importExportPage:Hide()
         professionPage:Hide()
         overviewPage:Hide()
+        if debugPage then debugPage:Hide() end
         page:Show()
     end
 
@@ -994,6 +1115,13 @@ local function CreateGTFrame()
         end
     end
 
+    if debugBtn then
+        debugBtn:SetScript("OnClick", function()
+            SelectSidebar(debugBtn)
+            ShowPage(debugPage)
+        end)
+    end
+
     f.RefreshProfessionPage = function()
         if professionPage.currentProfession then
             professionPage.Rebuild()
@@ -1001,9 +1129,9 @@ local function CreateGTFrame()
     end
 
     f:SetScript("OnShow", function()
-        SelectSidebar(importExportBtn)
-        ShowPage(importExportPage)
-        importExportPage.Refresh()
+        SelectSidebar(overviewBtn)
+        ShowPage(overviewPage)
+        overviewPage.ShowRoster()
     end)
 
     -- Frames are shown by default on creation; without this the very first

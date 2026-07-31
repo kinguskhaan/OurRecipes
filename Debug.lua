@@ -1,5 +1,12 @@
 local GT = GuildThing
 
+-- Flip to true to show the "Settings > Debug" page in the addon UI
+-- (buttons for the commands below, see UI.lua's BuildDebugPage). Never
+-- ship this on — it's a developer-only escape hatch, not something a
+-- regular user should stumble into. Slash commands (/or debug ...) work
+-- regardless of this flag either way.
+GT.DEBUG_UI_ENABLED = false
+
 -----------------------------
 -- P2P DEBUG TOOLS --
 -----------------------------
