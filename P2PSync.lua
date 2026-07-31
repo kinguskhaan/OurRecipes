@@ -14,7 +14,7 @@ local GT = GuildThing
 -----------------------------
 -- ALGORITHM --
 -----------------------------
--- 1-3 are built, 4-5 are planned.
+-- All 5 steps are built.
 --
 -- knownPeers = whoever has an entry in GuildThingDB.P2PData — no
 -- separate table. If someone logs in and broadcasts their stuff, that
@@ -46,13 +46,20 @@ local GT = GuildThing
 --    of strangers broadcast at once). Whispering them our own stuff
 --    also adds us to their knownPeers, no reply needed back.
 
--- 4. GOSSIP HANDSHAKE [planned] — every so often, whisper one known
---    peer, compare a quick hash first. Only exchange more if it
---    doesn't match.
+-- 4. GOSSIP HANDSHAKE — every so often, whisper one online knownPeer
+--    (prefer whoever we haven't gossiped with longest, skip anyone
+--    within the last 24h) a single combined hash of everything in
+--    P2PData. If it matches, they reply "same", done. If not, they
+--    reply with a small digest (name/hash/timestamp per person, their
+--    K stalest rows) — for each row that doesn't match what we already
+--    have, we ASK them for it (5). Only finds gaps in one direction
+--    per round (we check against them, not the reverse) — the other
+--    direction happens whenever they initiate a round against us or
+--    someone else instead.
 
--- 5. ASK [planned] — whisper someone directly for one specific
---    person's data, merge it in (recipes only ever get added, so
---    merging is always safe).
+-- 5. ASK — whisper someone directly for one specific person's data,
+--    merge it in (recipes only ever get added, so merging is always
+--    safe, even if we guessed wrong about who had the fresher copy).
 
 local ADDON_PREFIX = "GT_RECIPES"
 local CHUNK_BODY_LIMIT = 230 -- addon messages cap at 255 chars; header eats ~16-25
@@ -62,16 +69,21 @@ local SEQ_WRAP = 100 -- seq is a single-digit-friendly rolling counter, not a un
 -----------------------------
 -- REVERSE CATALOG INDEX --
 -----------------------------
--- spellID -> recipe name, built once from the bundled catalog so a
--- received flat ID list can be turned back into recipe names without
--- ever transmitting the names themselves. Only kind == "spell" entries
--- are covered (2 of ~2170 catalog entries are kind == "item" and are a
--- deliberately accepted gap here — still covered by manual export/import).
+-- spellID <-> recipe name, built once from the bundled catalog. The
+-- ID->name direction turns a received flat ID list back into recipe
+-- names without ever transmitting the names themselves; the reverse is
+-- needed for ASK (5), which re-encodes a cached entry's recipe names
+-- back into IDs to relay it in the same compact wire format. Only
+-- kind == "spell" entries are covered (2 of ~2170 catalog entries are
+-- kind == "item" and are a deliberately accepted gap here — still
+-- covered by manual export/import).
 local spellIDToRecipeName = {}
+local recipeNameToSpellID = {}
 for _, profName in ipairs(GT.GetProfessionOrder()) do
 	for _, recipe in ipairs(GT.GetCatalogForProfession(profName)) do
 		if recipe.kind == "spell" and recipe.id then
 			spellIDToRecipeName[recipe.id] = recipe.name
+			recipeNameToSpellID[recipe.name] = recipe.id
 		end
 	end
 end
@@ -106,14 +118,16 @@ local function CollectSelfKnownSpellIDs()
 	return ids
 end
 
--- Same encode pipeline whether the result goes out as a GUILD broadcast
--- or a WHISPER hello — JSON -> zlib -> Base64 -> 230-char chunks.
-local function ChunksFromIDs(ids)
+-- Same encode pipeline for a GUILD broadcast, a WHISPER hello, or an
+-- ASK response — JSON -> zlib -> Base64 -> 230-char chunks. subjectName
+-- is only set for an ASK response, where we're relaying someone ELSE's
+-- cached data rather than sending our own (see HandleCompletePayload).
+local function ChunksFromIDs(ids, class, subjectName)
 	if #ids == 0 then
 		return nil
 	end
 
-	local payload = { c = select(2, UnitClass("player")), ids = ids }
+	local payload = { c = class, ids = ids, s = subjectName }
 	local json = GuildThing_JSON:encode(payload)
 	local compressed = LibDeflate:CompressZlib(json)
 	local blob = GuildThing_Base64.encode(compressed)
@@ -166,7 +180,7 @@ local function TryBroadcastSelfRecipes()
 		return
 	end
 
-	local chunks = ChunksFromIDs(ids)
+	local chunks = ChunksFromIDs(ids, select(2, UnitClass("player")))
 	if not chunks then
 		return
 	end
@@ -192,7 +206,7 @@ local helloQueued = {} -- set, dedupes a sender already waiting in the queue
 
 local function SendHelloTo(senderName)
 	local ids = CollectSelfKnownSpellIDs()
-	local chunks = ChunksFromIDs(ids)
+	local chunks = ChunksFromIDs(ids, select(2, UnitClass("player")))
 	if not chunks then
 		return
 	end
@@ -225,6 +239,197 @@ local function QueueHello(senderName)
 end
 
 -----------------------------
+-- GOSSIP HANDSHAKE + ASK --
+-----------------------------
+-- Wire format for everything below: a single non-chunked WHISPER,
+-- distinguished from a DATA chunk (which always starts "digits:") by a
+-- leading letter tag. Small enough to never need chunking themselves —
+-- a hash or a handful of digest rows, not a recipe list.
+local GOSSIP_INTERVAL_SECONDS = 60 * 60
+local GOSSIP_COOLDOWN_SECONDS = 24 * 60 * 60
+local DIGEST_ROW_LIMIT = 5
+
+-- Canonical (sorted) recipe-name signature for one cached entry, hashed
+-- with LibDeflate's Adler32 so it stays short — same reasoning as the
+-- sorted spellID signature in TryBroadcastSelfRecipes: identical recipe
+-- sets must hash identically regardless of table iteration order.
+local function EntrySignatureHash(entry)
+	local names = {}
+	for name in pairs(entry.recipeNames) do
+		table.insert(names, name)
+	end
+	table.sort(names)
+	return LibDeflate:Adler32(table.concat(names, ","))
+end
+
+-- One hash standing in for our entire P2PData — cheap enough to whisper
+-- every round, and matching means there's nothing more to do this round.
+local function BuildCombinedHash()
+	local keys = {}
+	for key in pairs(GuildThingDB.P2PData or {}) do
+		table.insert(keys, key)
+	end
+	table.sort(keys)
+
+	local parts = {}
+	for _, key in ipairs(keys) do
+		table.insert(parts, key .. ":" .. EntrySignatureHash(GuildThingDB.P2PData[key]))
+	end
+	return LibDeflate:Adler32(table.concat(parts, ";"))
+end
+
+-- The K entries we've held onto longest without refreshing, so a
+-- mismatch eventually surfaces every cached person over enough rounds
+-- instead of only ever re-checking the same few.
+local function BuildDigestRows(limit)
+	local keys = {}
+	for key in pairs(GuildThingDB.P2PData or {}) do
+		table.insert(keys, key)
+	end
+	table.sort(keys, function(a, b)
+		return (GuildThingDB.P2PData[a].receivedAt or 0) < (GuildThingDB.P2PData[b].receivedAt or 0)
+	end)
+
+	local rows = {}
+	for i = 1, math.min(limit, #keys) do
+		local entry = GuildThingDB.P2PData[keys[i]]
+		table.insert(rows, string.format("%s,%s,%d", entry.name, EntrySignatureHash(entry), entry.receivedAt or 0))
+	end
+	return table.concat(rows, ";")
+end
+
+local function ParseDigestRows(str)
+	local rows = {}
+	for rowStr in str:gmatch("[^;]+") do
+		local name, hash, receivedAt = rowStr:match("^([^,]+),([^,]+),(%d+)$")
+		if name then
+			table.insert(rows, { name = name, hash = hash, receivedAt = tonumber(receivedAt) })
+		end
+	end
+	return rows
+end
+
+-- Classic-era roster lookup by name — GuildThingDB.ClubScan (Core.lua)
+-- doesn't track online status, so this is the simplest direct source.
+-- Guild size keeps this cheap even scanned once per candidate; gossip
+-- only runs hourly.
+local function IsGuildMemberOnline(name)
+	for i = 1, GetNumGuildMembers() do
+		local rosterName, _, _, _, _, _, _, _, online = GetGuildRosterInfo(i)
+		local rosterShortName = rosterName and rosterName:match("^([^-]+)")
+		if rosterShortName and string.lower(rosterShortName) == string.lower(name) then
+			return online
+		end
+	end
+	return false
+end
+
+local function GetGossipState()
+	GuildThingDB.P2PGossipState = GuildThingDB.P2PGossipState or {}
+	return GuildThingDB.P2PGossipState
+end
+
+local function PickGossipPartner()
+	local state = GetGossipState()
+	local candidates = {}
+	for key, entry in pairs(GuildThingDB.P2PData or {}) do
+		local lastSynced = state[key]
+		local recently = lastSynced and (time() - lastSynced) < GOSSIP_COOLDOWN_SECONDS
+		if not recently and entry.name and IsGuildMemberOnline(entry.name) then
+			table.insert(candidates, entry.name)
+		end
+	end
+	if #candidates == 0 then
+		return nil
+	end
+	return candidates[math.random(#candidates)]
+end
+
+local function TryGossipHandshake()
+	if not IsInGuild() then
+		return
+	end
+
+	-- GetGuildRosterInfo can serve stale/empty data until something has
+	-- requested a refresh this session — kick one every round so
+	-- IsGuildMemberOnline isn't working off a roster from before login.
+	GuildRoster()
+
+	local partner = PickGossipPartner()
+	if not partner then
+		return
+	end
+
+	local state = GetGossipState()
+	state[GT.ClubScanKey(partner, GetRealmName())] = time()
+
+	ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, "SYN:" .. BuildCombinedHash(), "WHISPER", partner)
+end
+
+local function ScheduleGossipHandshake()
+	TryGossipHandshake()
+	C_Timer.After(GOSSIP_INTERVAL_SECONDS, ScheduleGossipHandshake)
+end
+
+-- Someone whispered us their combined hash. Matching means we already
+-- have everything they do — reply "same" and stop. Otherwise hand back
+-- our own digest so they can spot which of our cached entries differ
+-- from theirs (see OnAckDigest for the other half of that exchange).
+local function OnSyn(senderName, theirHash)
+	if tostring(BuildCombinedHash()) == theirHash then
+		ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, "ACKM", "WHISPER", senderName)
+	else
+		ChatThrottleLib:SendAddonMessage(
+			"BULK",
+			ADDON_PREFIX,
+			"ACKD:" .. BuildDigestRows(DIGEST_ROW_LIMIT),
+			"WHISPER",
+			senderName
+		)
+	end
+end
+
+-- For every row that doesn't match what we already have cached (missing
+-- entirely, or a different hash), ASK the peer who showed it to us —
+-- one whisper per gap, ChatThrottleLib paces them same as anything else.
+local function OnAckDigest(senderName, rowsStr)
+	for _, row in ipairs(ParseDigestRows(rowsStr)) do
+		local key = GT.ClubScanKey(row.name, GetRealmName())
+		local ownEntry = GuildThingDB.P2PData and GuildThingDB.P2PData[key]
+		local ownHash = ownEntry and tostring(EntrySignatureHash(ownEntry))
+		if ownHash ~= row.hash then
+			ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, "ASKQ:" .. row.name, "WHISPER", senderName)
+		end
+	end
+end
+
+-- Someone asked for a specific person's cached data. Re-encode their
+-- recipe names back into spellIDs (recipeNameToSpellID) so the reply
+-- goes out in the same compact chunked format as a normal broadcast,
+-- just tagged with whose data it actually is.
+local function OnAskRequest(senderName, targetName)
+	local entry = GuildThingDB.P2PData and GuildThingDB.P2PData[GT.ClubScanKey(targetName, GetRealmName())]
+	if not entry then
+		return
+	end
+
+	local ids = {}
+	for name in pairs(entry.recipeNames) do
+		local id = recipeNameToSpellID[name]
+		if id then
+			table.insert(ids, id)
+		end
+	end
+	table.sort(ids)
+
+	local chunks = ChunksFromIDs(ids, entry.class, targetName)
+	if not chunks then
+		return
+	end
+	SendChunks(chunks, "WHISPER", senderName)
+end
+
+-----------------------------
 -- RECEIVING --
 -----------------------------
 
@@ -234,9 +439,15 @@ end
 local pendingChunks = {}
 
 -- Reverse of TryBroadcastSelfRecipes' send pipeline: Base64 -> zlib ->
--- JSON -> spellID list -> recipe names, then stored under the sender's
--- name-realm key. Any step failing (corrupt/partial data) just drops
--- the payload silently, never touches our own saved data.
+-- JSON -> spellID list -> recipe names. Stored under the SENDER's
+-- name-realm key normally — but payload.s (only set on an ASK reply,
+-- see OnAskRequest) means this is someone else's data relayed through
+-- the sender, so it's stored under the subject's key instead. Either
+-- way we fill in on top of whatever's already cached rather than
+-- replacing it — recipes are only ever gained, so union is always
+-- correct even if the relayed copy turns out to be the staler one. Any
+-- decode step failing (corrupt/partial data) just drops the payload
+-- silently, never touches our own saved data.
 local function HandleCompletePayload(senderName, blob)
 	local decodeOk, compressed = pcall(GuildThing_Base64.decode, blob)
 	if not decodeOk or not compressed then
@@ -257,7 +468,12 @@ local function HandleCompletePayload(senderName, blob)
 		return
 	end
 
-	local recipeNames = {}
+	local subjectName = payload.s or senderName
+	GuildThingDB.P2PData = GuildThingDB.P2PData or {}
+	local key = GT.ClubScanKey(subjectName, GetRealmName())
+
+	local existing = GuildThingDB.P2PData[key]
+	local recipeNames = existing and existing.recipeNames or {}
 	for _, spellID in ipairs(payload.ids) do
 		local name = spellIDToRecipeName[spellID]
 		if name then
@@ -265,10 +481,8 @@ local function HandleCompletePayload(senderName, blob)
 		end
 	end
 
-	GuildThingDB.P2PData = GuildThingDB.P2PData or {}
-	local key = GT.ClubScanKey(senderName, GetRealmName())
 	GuildThingDB.P2PData[key] = {
-		name = senderName,
+		name = subjectName,
 		realm = GetRealmName(),
 		class = payload.c,
 		recipeNames = recipeNames,
@@ -300,6 +514,22 @@ local function OnAddonMessage(prefix, message, channel, sender)
 	-- forth forever.
 	if channel == "GUILD" and not GT.GetP2PEntry(senderName, GetRealmName()) then
 		QueueHello(senderName)
+	end
+
+	-- Gossip handshake + ASK control messages are single, non-chunked
+	-- whispers tagged with a leading letter — never mistaken for a DATA
+	-- chunk header, which always starts with digits.
+	if message:sub(1, 4) == "SYN:" then
+		OnSyn(senderName, message:sub(5))
+		return
+	elseif message == "ACKM" then
+		return
+	elseif message:sub(1, 5) == "ACKD:" then
+		OnAckDigest(senderName, message:sub(6))
+		return
+	elseif message:sub(1, 5) == "ASKQ:" then
+		OnAskRequest(senderName, message:sub(6))
+		return
 	end
 
 	local seq, index, total, chunk = message:match("^(%d+):(%d+):(%d+):(.*)$")
@@ -343,6 +573,7 @@ p2pFrame:SetScript("OnEvent", function(_, event, ...)
 		OnAddonMessage(...)
 	else
 		TryBroadcastSelfRecipes()
+		ScheduleGossipHandshake()
 	end
 end)
 
