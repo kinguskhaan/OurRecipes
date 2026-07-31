@@ -1,0 +1,4 @@
+# Release zips are built via `git archive` from a tag and shipped
+# alongside the addon folder (../), never inside the repo — this is just
+# a safety net in case one ever ends up in here by accident.
+*.zip

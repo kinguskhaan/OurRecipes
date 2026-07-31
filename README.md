@@ -2,7 +2,7 @@
 
 # Our Recipes!
 
-WoW Classic addon for browsing and sharing who in your guild knows which recipes and enchants.
+WoW TBC Anniversary addon for browsing and sharing who in your guild knows which recipes and enchants.
 
 ## Our Installation
 
