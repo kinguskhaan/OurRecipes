@@ -1,7 +1,7 @@
 ## Interface: 20505
 ## Title: Our Recipes!
 ## Notes: Browse and share who in the guild knows which recipes/enchants
-## Version: 1.0
+## Version: 0.1.0-beta.1
 ## SavedVariables: GuildThingDB
 
 Libs/LibDeflate.lua
