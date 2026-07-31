@@ -3,7 +3,6 @@ local GT = GuildThing
 -----------------------------
 -- P2P RECIPE SYNC --
 -----------------------------
----
 -- Symmetric addon-message mesh over the guild channel: every GuildThing
 -- client broadcasts its own known recipes (as compact spellIDs, not
 -- names) and merges what it hears from everyone else. No leader
@@ -15,26 +14,22 @@ local GT = GuildThing
 -----------------------------
 -- ALGORITHM --
 -----------------------------
--- 1-2 are built, 3-5 are planned.
+-- 1-3 are built, 4-5 are planned.
 --
--- knownPeers = a table of everyone we've heard from before. Hearing
--- any message proves they have the addon, so that's the whole
--- discovery mechanism.
+-- knownPeers = whoever has an entry in GuildThingDB.P2PData — no
+-- separate table. If someone logs in and broadcasts their stuff, that
+-- proves they have the addon; once we've added their recipes, they're
+-- in our knownPeers. If they were new to us, we're probably new to
+-- them too — so we whisper back our own recipes, and they add us to
+-- their knownPeers the same way. That's the whole discovery mechanism.
 --
--- On throttling: the WoW server disconnects a client for sending too
--- much of its OWN output too fast — it doesn't care how many other
--- people are also sending, only your own connection's rate.
--- ChatThrottleLib (the community-standard guard most addons use)
--- allows bursts up to 4000 bytes, then throttles to 800 bytes/sec
--- sustained. Worst realistic broadcast size here — the two biggest
--- professions, Blacksmithing + Leatherworking, ~770 recipes — compresses
--- to ~9 chunks / ~2KB, comfortably under that burst limit even sent
--- all at once. So a single player's own broadcast is never the risk.
--- The actual risk is many outgoing WHISPERS firing from the SAME
--- client back to back (e.g. 3's reactive hello, if a bunch of
--- strangers all broadcast during the same login) — that stacks
--- against that one client's own budget. That's why 3-4 queue/stagger
--- instead of firing everything at once.
+-- On throttling: ~3000 CPS (own output, sustained) gets you disconnected.
+-- ChatThrottleLib handles this for us — shared safe budget across every
+-- addon using it, so a single broadcast is never the risk. The actual
+-- risk is many outgoing WHISPERS firing from the SAME client back to
+-- back (e.g. 3's reactive hello, if a bunch of strangers all broadcast
+-- during the same login) — that's why 3-4 queue/stagger instead of
+-- firing everything at once.
 
 -- 1. BROADCAST — on login, or when own recipes changed, compress own
 --    known recipes and send to guild chat. Skip if unchanged and sent
@@ -45,11 +40,11 @@ local GT = GuildThing
 --    knownPeers. We fill in the new recipes, never overwrite, so we
 --    don't risk writing over stuff with old data.
 
--- 3. REACTIVE HELLO [planned] — hear someone new for the first time ->
---    put them in a queue, and whisper them one by one, a few seconds
---    apart, regardless of how many piled up (a fresh login can hear a
---    bunch of strangers broadcast at once). Whispering them your own
---    stuff also adds you to their knownPeers, no reply needed back.
+-- 3. REACTIVE HELLO — hear someone new for the first time -> put them
+--    in a queue, and whisper them one by one, a few seconds apart,
+--    regardless of how many piled up (a fresh login can hear a bunch
+--    of strangers broadcast at once). Whispering them our own stuff
+--    also adds us to their knownPeers, no reply needed back.
 
 -- 4. GOSSIP HANDSHAKE [planned] — every so often, whisper one known
 --    peer, compare a quick hash first. Only exchange more if it
@@ -111,19 +106,38 @@ local function CollectSelfKnownSpellIDs()
 	return ids
 end
 
--- seq rolls 0-99 per broadcast (not per chunk) so a receiver can tell a
--- fresh send apart from a stale one still trickling in from before.
+-- Same encode pipeline whether the result goes out as a GUILD broadcast
+-- or a WHISPER hello — JSON -> zlib -> Base64 -> 230-char chunks.
+local function ChunksFromIDs(ids)
+	if #ids == 0 then
+		return nil
+	end
+
+	local payload = { c = select(2, UnitClass("player")), ids = ids }
+	local json = GuildThing_JSON:encode(payload)
+	local compressed = LibDeflate:CompressZlib(json)
+	local blob = GuildThing_Base64.encode(compressed)
+
+	local chunks = {}
+	for i = 1, #blob, CHUNK_BODY_LIMIT do
+		table.insert(chunks, blob:sub(i, i + CHUNK_BODY_LIMIT - 1))
+	end
+	return chunks
+end
+
+-- seq rolls 0-99 per send (not per chunk) so a receiver can tell a fresh
+-- send apart from a stale one still trickling in from before.
 local sendSeq = 0
 
 -- ChatThrottleLib paces and bursts these safely on its own (shared budget
 -- with every other addon using it) — no need for our own delay/stagger.
-local function SendChunks(chunks)
+local function SendChunks(chunks, chatType, target)
 	sendSeq = (sendSeq + 1) % SEQ_WRAP
 	local seq = sendSeq
 	local total = #chunks
 	for i, chunk in ipairs(chunks) do
 		local header = string.format("%d:%d:%d:", seq, i, total)
-		ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, header .. chunk, "GUILD")
+		ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, header .. chunk, chatType, target)
 	end
 end
 
@@ -152,20 +166,62 @@ local function TryBroadcastSelfRecipes()
 		return
 	end
 
-	local payload = { c = select(2, UnitClass("player")), ids = ids }
-	local json = GuildThing_JSON:encode(payload)
-	local compressed = LibDeflate:CompressZlib(json)
-	local blob = GuildThing_Base64.encode(compressed)
-
-	local chunks = {}
-	for i = 1, #blob, CHUNK_BODY_LIMIT do
-		table.insert(chunks, blob:sub(i, i + CHUNK_BODY_LIMIT - 1))
+	local chunks = ChunksFromIDs(ids)
+	if not chunks then
+		return
 	end
-
-	SendChunks(chunks)
+	SendChunks(chunks, "GUILD")
 
 	entry.p2pLastSentSignature = signature
 	entry.p2pLastSentAt = time()
+end
+
+-----------------------------
+-- REACTIVE HELLO --
+-----------------------------
+-- Fires on our side when we hear a GUILD broadcast from someone not yet
+-- in GuildThingDB.P2PData — whisper them our own data so they learn
+-- about us too, without waiting on our own next scheduled broadcast.
+-- Never triggers off a WHISPER (see the channel check in OnAddonMessage)
+-- — otherwise two strangers who don't know each other could whisper
+-- "hello" back and forth forever.
+local HELLO_STAGGER_SECONDS = 3
+
+local helloQueue = {}
+local helloQueued = {} -- set, dedupes a sender already waiting in the queue
+
+local function SendHelloTo(senderName)
+	local ids = CollectSelfKnownSpellIDs()
+	local chunks = ChunksFromIDs(ids)
+	if not chunks then
+		return
+	end
+	SendChunks(chunks, "WHISPER", senderName)
+end
+
+-- Drains one entry every HELLO_STAGGER_SECONDS, no matter how many piled
+-- up — a fresh login can hear a whole batch of strangers broadcast at
+-- once, and this keeps us from opening a dozen whisper streams at once.
+local function DrainHelloQueue()
+	local senderName = table.remove(helloQueue, 1)
+	if not senderName then
+		return
+	end
+	helloQueued[senderName] = nil
+	SendHelloTo(senderName)
+	C_Timer.After(HELLO_STAGGER_SECONDS, DrainHelloQueue)
+end
+
+local function QueueHello(senderName)
+	if helloQueued[senderName] then
+		return
+	end
+	helloQueued[senderName] = true
+	local wasEmpty = #helloQueue == 0
+	table.insert(helloQueue, senderName)
+	if wasEmpty then
+		DrainHelloQueue()
+	end
 end
 
 -----------------------------
@@ -223,7 +279,7 @@ end
 -- Buffers chunks per sender until all of them have arrived, then hands
 -- the reassembled blob to HandleCompletePayload. Every other GT_RECIPES
 -- message (broadcast or otherwise) funnels through here.
-local function OnAddonMessage(prefix, message, _, sender)
+local function OnAddonMessage(prefix, message, channel, sender)
 	if prefix ~= ADDON_PREFIX then
 		return
 	end
@@ -238,6 +294,13 @@ local function OnAddonMessage(prefix, message, _, sender)
 	if string.lower(senderName) == string.lower(UnitName("player")) then
 		return
 	end -- ignore our own broadcast, if it ever echoes
+
+	-- Only a GUILD broadcast can trigger a hello — never a WHISPER, or
+	-- two strangers who don't know each other could whisper back and
+	-- forth forever.
+	if channel == "GUILD" and not GT.GetP2PEntry(senderName, GetRealmName()) then
+		QueueHello(senderName)
+	end
 
 	local seq, index, total, chunk = message:match("^(%d+):(%d+):(%d+):(.*)$")
 	if not seq then
