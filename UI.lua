@@ -35,6 +35,37 @@ local function SetNativeTooltip(kind, id)
     return false
 end
 
+-- fzf-style fuzzy match: every character of query must appear in text, in
+-- order, but not necessarily contiguous ("twk" matches "Tankkingen"). Returns
+-- a score (higher = better) or nil if query doesn't match at all. Contiguous
+-- runs and word-start hits score higher, same rough shape as fzf's own
+-- ranking, so tighter/earlier matches float to the top of the results.
+local function FuzzyMatch(text, query)
+    if query == "" then return 0 end
+    text, query = text:lower(), query:lower()
+
+    local score, textPos, consecutive = 0, 1, 0
+    for i = 1, #query do
+        local matchPos = text:find(query:sub(i, i), textPos, true)
+        if not matchPos then return nil end
+
+        if matchPos == textPos then
+            consecutive = consecutive + 1
+            score = score + 10 + consecutive * 2
+        else
+            consecutive = 0
+            score = score + 1
+        end
+        if matchPos == 1 or text:sub(matchPos - 1, matchPos - 1) == " " then
+            score = score + 5
+        end
+        textPos = matchPos + 1
+    end
+
+    -- Tiebreak toward tighter matches (less unmatched slack in text).
+    return score - (#text - #query) * 0.1
+end
+
 local function FormatCrafters(crafters)
     if #crafters == 0 then return "no one yet" end
 
@@ -459,6 +490,23 @@ local function BuildOverviewPage(parent)
     backBtn:Hide()
     page.backBtn = backBtn
 
+    -- Roster-only fuzzy search (fzf-style, see FuzzyMatch) — same top-right
+    -- slot backBtn uses, since the two are never shown at the same time
+    -- (this is level 1 only, backBtn is level 2+).
+    local rosterSearchLabel = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    rosterSearchLabel:SetText("Find:")
+
+    local rosterSearchBox = CreateFrame("EditBox", nil, page, "InputBoxTemplate")
+    rosterSearchBox:SetSize(140, 20)
+    rosterSearchBox:SetPoint("TOPRIGHT", -12, -6)
+    rosterSearchBox:SetAutoFocus(false)
+    rosterSearchBox:SetScript("OnEscapePressed", function(self)
+        self:SetText("")
+        self:ClearFocus()
+    end)
+
+    rosterSearchLabel:SetPoint("RIGHT", rosterSearchBox, "LEFT", -6, 0)
+
     -- Forward decls: filter buttons / checkboxes below close over these.
     local ShowRoster, ShowCharacter, ShowCharacterProfession
     local RebuildRoster, RebuildCharacterProfession
@@ -469,6 +517,9 @@ local function BuildOverviewPage(parent)
     -- no profession data at all are hidden by default (see RebuildRoster);
     -- toggling this is the only way to bring them back.
     local NO_PROFESSION_LABEL = "No profession"
+
+    -- Live-updates as you type, same as the level-3 recipe search box below.
+    rosterSearchBox:SetScript("OnTextChanged", function() RebuildRoster() end)
 
     -- Profession filter row — roster only (level 1). Plain clickable text,
     -- not buttons: normal color when off, a highlight color when toggled
@@ -680,6 +731,7 @@ local function BuildOverviewPage(parent)
     RebuildRoster = function()
         local items = {}
         local hasNoFilters = not next(activeProfessionFilters)
+        local query = (rosterSearchBox:GetText() or ""):match("^%s*(.-)%s*$")
         for _, char in ipairs(GT.GetRoster()) do
             local summary = GT.GetCharacterProfessionSummary(char.name, char.realm)
             local profTags = {}
@@ -710,6 +762,14 @@ local function BuildOverviewPage(parent)
                 matchesFilter = activeProfessionFilters[NO_PROFESSION_LABEL] == true
             end
 
+            local searchScore = 0
+            if matchesFilter and query ~= "" then
+                searchScore = FuzzyMatch(char.name, query)
+                if not searchScore then
+                    matchesFilter = false
+                end
+            end
+
             if matchesFilter then
                 local r, g, b = GetClassColor(char.class)
                 table.insert(items, {
@@ -717,19 +777,32 @@ local function BuildOverviewPage(parent)
                     sub = #profTags > 0 and table.concat(profTags, ", ") or "no professions known",
                     r = r, g = g, b = b,
                     sortRank = sortRank,
+                    searchScore = searchScore,
                     onClick = function() ShowCharacter(char) end,
                 })
             end
         end
 
-        -- Highest rank first (relevant-to-current-filter rank, see above),
-        -- alphabetical as a tiebreak / for those with no rank at all.
-        table.sort(items, function(a, b)
-            if a.sortRank ~= b.sortRank then
-                return a.sortRank > b.sortRank
-            end
-            return a.name:lower() < b.name:lower()
-        end)
+        if query ~= "" then
+            -- Searching: best fuzzy match first, alphabetical tiebreak —
+            -- profession rank stops mattering once you're hunting a name.
+            table.sort(items, function(a, b)
+                if a.searchScore ~= b.searchScore then
+                    return a.searchScore > b.searchScore
+                end
+                return a.name:lower() < b.name:lower()
+            end)
+        else
+            -- No search: highest rank first (relevant-to-current-filter
+            -- rank, see above), alphabetical as a tiebreak / for those with
+            -- no rank at all.
+            table.sort(items, function(a, b)
+                if a.sortRank ~= b.sortRank then
+                    return a.sortRank > b.sortRank
+                end
+                return a.name:lower() < b.name:lower()
+            end)
+        end
 
         page.items = items
         UpdateRows()
@@ -740,6 +813,8 @@ local function BuildOverviewPage(parent)
         backBtn:Hide()
         toolbar:Hide()
         filterBar:Show()
+        rosterSearchLabel:Show()
+        rosterSearchBox:Show()
         AnchorScrollBelow(filterBar, 8)
         RebuildRoster()
     end
@@ -747,6 +822,8 @@ local function BuildOverviewPage(parent)
     ShowCharacter = function(char)
         breadcrumb:SetText((char.name or "?") .. "'s professions")
         backBtn:Show()
+        rosterSearchLabel:Hide()
+        rosterSearchBox:Hide()
         backBtn:SetScript("OnClick", ShowRoster)
         filterBar:Hide()
         toolbar:Hide()
@@ -785,10 +862,10 @@ local function BuildOverviewPage(parent)
     RebuildCharacterProfession = function()
         if not page.currentChar or not page.currentProfName then return end
 
-        local query = (searchBox:GetText() or ""):lower()
+        local query = searchBox:GetText() or ""
         local items = {}
         for _, status in ipairs(GT.GetCharacterRecipeStatuses(page.currentChar.name, page.currentChar.realm, page.currentProfName)) do
-            if query == "" or status.name:lower():find(query, 1, true) then
+            if query == "" or FuzzyMatch(status.name, query) then
                 table.insert(items, {
                     name = status.name,
                     icon = status.icon,
