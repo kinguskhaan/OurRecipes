@@ -7,12 +7,12 @@ local GT = GuildThing
 -- CHARACTER STATE (SELF) --
 -----------------------------
 
-local function CharKey()
+function GT.CharKey()
     return UnitName("player") .. "-" .. GetRealmName()
 end
 
 local function GetCharEntry()
-    local key = CharKey()
+    local key = GT.CharKey()
     GuildThingDB[key] = GuildThingDB[key] or {
         name = UnitName("player"),
         realm = GetRealmName(),
@@ -171,13 +171,13 @@ local PRIMARY_PROFESSION_ID_TO_NAME = {
     [755] = "Jewelcrafting",
 }
 
-local function ClubScanKey(name, realm)
+function GT.ClubScanKey(name, realm)
     return string.lower((name or "") .. "-" .. (realm or ""))
 end
 
 function GT.GetClubScanEntry(name, realm)
     local scan = GuildThingDB.ClubScan
-    return scan and scan[ClubScanKey(name, realm)]
+    return scan and scan[GT.ClubScanKey(name, realm)]
 end
 
 -- Populated by P2PSync.lua from the addon-message mesh — recipe-level
@@ -185,7 +185,7 @@ end
 -- needed. Same key convention as ClubScan above.
 function GT.GetP2PEntry(name, realm)
     local data = GuildThingDB.P2PData
-    return data and data[ClubScanKey(name, realm)]
+    return data and data[GT.ClubScanKey(name, realm)]
 end
 
 local function ScanGuildClubProfessions()
@@ -220,7 +220,7 @@ local function ScanGuildClubProfessions()
                 classFile = classInfo and classInfo.classFile
             end
 
-            scan[ClubScanKey(info.name, realm)] = {
+            scan[GT.ClubScanKey(info.name, realm)] = {
                 name = info.name,
                 realm = realm,
                 class = classFile,
