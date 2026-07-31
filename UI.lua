@@ -945,15 +945,32 @@ local function BuildSettingsPage(parent)
     local page = CreateFrame("Frame", nil, parent)
     page:SetAllPoints()
 
-    local title = page:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    -- Content outgrew the fixed window height (P2P tuning rows, force-
+    -- broadcast button, etc.), so everything below lives on a scroll
+    -- child instead of directly on page. scrollChild's height is a fixed
+    -- generous estimate (not measured) since this page's layout is
+    -- static — bump it if a future row pushes past the bottom again.
+    local scrollFrame = CreateFrame("ScrollFrame", nil, page, "UIPanelScrollFrameTemplate")
+    scrollFrame:SetPoint("TOPLEFT", 0, 0)
+    scrollFrame:SetPoint("BOTTOMRIGHT", -20, 0)
+
+    -- SetScrollChild below re-anchors the child to the scrollframe's
+    -- TOPLEFT itself, clearing any points set on it beforehand — so
+    -- width/height have to come from SetSize, not TOPLEFT/TOPRIGHT
+    -- anchors, or the child (and everything on it) ends up zero-width.
+    local scrollChild = CreateFrame("Frame", nil, scrollFrame)
+    scrollChild:SetSize(page:GetWidth() - 20, 640)
+    scrollFrame:SetScrollChild(scrollChild)
+
+    local title = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     title:SetPoint("TOPLEFT", 4, -4)
     title:SetText("Settings")
 
-    local minimapCheck = CreateFrame("CheckButton", nil, page, "UICheckButtonTemplate")
+    local minimapCheck = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
     minimapCheck:SetSize(20, 20)
     minimapCheck:SetPoint("TOPLEFT", title, "BOTTOMLEFT", -2, -12)
 
-    local minimapLabel = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    local minimapLabel = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     minimapLabel:SetPoint("LEFT", minimapCheck, "RIGHT", 2, 0)
     minimapLabel:SetText("Show minimap icon")
 
@@ -968,13 +985,13 @@ local function BuildSettingsPage(parent)
     end)
 
     -- P2P sync tuning — see GetResendIntervalSeconds in P2PSync.lua.
-    local p2pHeader = page:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local p2pHeader = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     p2pHeader:SetPoint("TOPLEFT", minimapCheck, "BOTTOMLEFT", 2, -16)
     p2pHeader:SetText("P2P recipe sync")
 
-    local p2pHint = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    local p2pHint = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     p2pHint:SetPoint("TOPLEFT", p2pHeader, "BOTTOMLEFT", 0, -4)
-    p2pHint:SetPoint("RIGHT", page, "RIGHT", -12, 0)
+    p2pHint:SetPoint("RIGHT", scrollChild, "RIGHT", -12, 0)
     p2pHint:SetJustifyH("LEFT")
     p2pHint:SetText(
         "Your character tells the guild what recipes it knows every so often, "
@@ -987,17 +1004,17 @@ local function BuildSettingsPage(parent)
     -- anchor) — a plain number with no explanation was the whole
     -- complaint this replaced, so the "why" line is not optional here.
     local function AddNumberSetting(labelText, hintText, anchor, getValue, setValue)
-        local label = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        local label = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         label:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -14)
         label:SetText(labelText)
 
-        local hint = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        local hint = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
         hint:SetPoint("TOPLEFT", label, "BOTTOMLEFT", 0, -2)
-        hint:SetPoint("RIGHT", page, "RIGHT", -12, 0)
+        hint:SetPoint("RIGHT", scrollChild, "RIGHT", -12, 0)
         hint:SetJustifyH("LEFT")
         hint:SetText(hintText)
 
-        local box = CreateFrame("EditBox", nil, page, "InputBoxTemplate")
+        local box = CreateFrame("EditBox", nil, scrollChild, "InputBoxTemplate")
         box:SetSize(50, 20)
         box:SetNumeric(true)
         box:SetAutoFocus(false)
@@ -1040,9 +1057,9 @@ local function BuildSettingsPage(parent)
 
     -- Live readout: turns the two abstract numbers above into a concrete
     -- "here's what that means right now" sentence.
-    local effectiveStatus = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    local effectiveStatus = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     effectiveStatus:SetPoint("TOPLEFT", peerThresholdBox, "BOTTOMLEFT", -2, -14)
-    effectiveStatus:SetPoint("RIGHT", page, "RIGHT", -12, 0)
+    effectiveStatus:SetPoint("RIGHT", scrollChild, "RIGHT", -12, 0)
     effectiveStatus:SetJustifyH("LEFT")
     effectiveStatus:SetTextColor(0.6, 0.6, 0.6)
 
@@ -1061,18 +1078,18 @@ local function BuildSettingsPage(parent)
     -- Manual peer cleanup — GT.PruneDepartedPeers also runs automatically
     -- off GUILD_ROSTER_UPDATE (Core.lua), this is just an on-demand nudge
     -- plus a fresh server roster request before it runs.
-    local pruneBtn = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+    local pruneBtn = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
     pruneBtn:SetSize(190, 22)
     pruneBtn:SetPoint("TOPLEFT", effectiveStatus, "BOTTOMLEFT", 2, -10)
     pruneBtn:SetText("Refresh roster / clean up peers")
 
-    local pruneHint = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    local pruneHint = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     pruneHint:SetPoint("TOPLEFT", pruneBtn, "BOTTOMLEFT", 2, -6)
-    pruneHint:SetPoint("RIGHT", page, "RIGHT", -12, 0)
+    pruneHint:SetPoint("RIGHT", scrollChild, "RIGHT", -12, 0)
     pruneHint:SetJustifyH("LEFT")
     pruneHint:SetText("Asks the server for the current guild member list and removes any cached peer who's no longer in the guild. Happens automatically too, this is just an on-demand check.")
 
-    local pruneStatus = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    local pruneStatus = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     pruneStatus:SetPoint("TOPLEFT", pruneHint, "BOTTOMLEFT", 0, -6)
 
     pruneBtn:SetScript("OnClick", function()
@@ -1083,18 +1100,18 @@ local function BuildSettingsPage(parent)
 
     -- Same entry point as "/or debug broadcast" — skips the throttle
     -- entirely, same as GT.DebugForceBroadcast(true) below.
-    local forceBroadcastBtn = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+    local forceBroadcastBtn = CreateFrame("Button", nil, scrollChild, "UIPanelButtonTemplate")
     forceBroadcastBtn:SetSize(190, 22)
     forceBroadcastBtn:SetPoint("TOPLEFT", pruneStatus, "BOTTOMLEFT", 0, -10)
     forceBroadcastBtn:SetText("Force broadcast now")
 
-    local forceBroadcastHint = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    local forceBroadcastHint = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     forceBroadcastHint:SetPoint("TOPLEFT", forceBroadcastBtn, "BOTTOMLEFT", 2, -6)
-    forceBroadcastHint:SetPoint("RIGHT", page, "RIGHT", -12, 0)
+    forceBroadcastHint:SetPoint("RIGHT", scrollChild, "RIGHT", -12, 0)
     forceBroadcastHint:SetJustifyH("LEFT")
     forceBroadcastHint:SetText("Sends your known recipes to the guild right now, ignoring the throttle above.")
 
-    local forceBroadcastStatus = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    local forceBroadcastStatus = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     forceBroadcastStatus:SetPoint("TOPLEFT", forceBroadcastHint, "BOTTOMLEFT", 0, -6)
 
     forceBroadcastBtn:SetScript("OnClick", function()
