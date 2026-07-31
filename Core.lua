@@ -289,6 +289,52 @@ local function EncodeRecipes(recipes)
     return "[" .. table.concat(parts, ",") .. "]"
 end
 
+local function EncodeProfessionsMap(professions)
+    local parts = {}
+    for skillName, recipes in pairs(professions) do
+        table.insert(parts, string.format('"%s":%s', JSONEscape(skillName), EncodeRecipes(recipes)))
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+end
+
+-- name -> {profession, kind, id}, built once across the whole catalog. Only
+-- P2P-cached peer data (GuildThingDB.P2PData) needs this — it stores just
+-- recipe names with no profession/id attached, unlike a live scan (which
+-- already has both from Core.lua's own trade skill window reads).
+local recipeCatalogByName
+local function CatalogEntryByName(name)
+    if not recipeCatalogByName then
+        recipeCatalogByName = {}
+        for _, profName in ipairs(GT.GetProfessionOrder()) do
+            for _, recipe in ipairs(GT.GetCatalogForProfession(profName)) do
+                recipeCatalogByName[recipe.name] = { profession = profName, kind = recipe.kind, id = recipe.id }
+            end
+        end
+    end
+    return recipeCatalogByName[name]
+end
+
+-- Turns a P2P-cached peer's flat recipeNames set back into the same
+-- {profession -> recipe[]} shape GT.ExportCurrentCharacter already builds
+-- from a live scan, by looking each name up in the catalog. Names with no
+-- catalog match (shouldn't happen — they only ever came from the catalog
+-- in the first place, via P2PSync.lua's spellID->name table) are skipped.
+local function BuildPeerProfessions(recipeNames)
+    local professions = {}
+    for name in pairs(recipeNames) do
+        local info = CatalogEntryByName(name)
+        if info then
+            professions[info.profession] = professions[info.profession] or {}
+            table.insert(professions[info.profession], {
+                name = name,
+                itemID = info.kind == "item" and info.id or nil,
+                spellID = info.kind == "spell" and info.id or nil,
+            })
+        end
+    end
+    return professions
+end
+
 -----------------------------
 -- CATALOG / PROFESSION DATA ACCESS --
 -----------------------------
@@ -576,18 +622,36 @@ end
 -- unlike the GuildData import direction (GuildData.lua) which is
 -- Base64+zlib-compressed; this one is short enough per-character not to
 -- need it.
+--
+-- peers: everyone this character has picked up via the P2P mesh
+-- (GuildThingDB.P2PData), each shaped exactly like the top-level character
+-- object — so the website can validate/import them the same way it
+-- already does the main export, just looped. Skips anyone with zero
+-- catalog-resolvable recipes (nothing usable to send).
 function GT.ExportCurrentCharacter()
     local entry = GetCharEntry()
     entry.lastImport = time()
-    local profParts = {}
-    for skillName, recipes in pairs(entry.professions) do
-        table.insert(profParts, string.format('"%s":%s', JSONEscape(skillName), EncodeRecipes(recipes)))
+
+    local peerParts = {}
+    for _, peer in pairs(GuildThingDB.P2PData or {}) do
+        local professions = BuildPeerProfessions(peer.recipeNames or {})
+        if next(professions) then
+            table.insert(peerParts, string.format(
+                '{"name":"%s","realm":"%s","class":"%s","professions":%s}',
+                JSONEscape(peer.name or ""),
+                JSONEscape(peer.realm or ""),
+                JSONEscape(peer.class or ""),
+                EncodeProfessionsMap(professions)
+            ))
+        end
     end
+
     return string.format(
-        '{"name":"%s","realm":"%s","class":"%s","professions":{%s}}',
+        '{"name":"%s","realm":"%s","class":"%s","professions":%s,"peers":[%s]}',
         JSONEscape(entry.name),
         JSONEscape(entry.realm),
         JSONEscape(entry.class),
-        table.concat(profParts, ",")
+        EncodeProfessionsMap(entry.professions),
+        table.concat(peerParts, ",")
     )
 end
