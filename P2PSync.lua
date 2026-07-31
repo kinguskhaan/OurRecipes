@@ -729,7 +729,7 @@ end)
 -----------------------------
 -- DEBUG HOOKS --
 -----------------------------
--- Thin wrappers so /gt debug (Debug.lua) can exercise this file's
+-- Thin wrappers so /or debug (Debug.lua) can exercise this file's
 -- internals without a second account/client online — everything above
 -- is guild-chat/whisper based and otherwise hard to test solo.
 function GT.DebugForceBroadcast()

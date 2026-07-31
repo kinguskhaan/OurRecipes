@@ -287,14 +287,14 @@ local function CheckExportReminder()
     if not next(entry.professions) then return end -- nothing to export yet
 
     if not entry.lastImport then
-        print("|cffffff00[GuildThing]|r You haven't exported this character to the GuildThing website yet. Type /gt to do so!")
+        print("|cffffff00[GuildThing]|r You haven't exported this character to the GuildThing website yet. Type /or to do so!")
         return
     end
 
     local elapsed = time() - entry.lastImport
     if elapsed >= REMINDER_THRESHOLD_SECONDS then
         local weeks = math.floor(elapsed / (7 * 24 * 60 * 60))
-        print(("|cffffff00[GuildThing]|r It's been %d week%s since you updated your GuildThing export. Time to update! Type /gt to do so."):format(
+        print(("|cffffff00[GuildThing]|r It's been %d week%s since you updated your GuildThing export. Time to update! Type /or to do so."):format(
             weeks, weeks == 1 and "" or "s"
         ))
     end

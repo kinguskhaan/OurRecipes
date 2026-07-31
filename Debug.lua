@@ -10,7 +10,7 @@ GT.DEBUG_UI_ENABLED = false
 -----------------------------
 -- P2P DEBUG TOOLS --
 -----------------------------
--- `/gt debug <command>` — manual test hooks for the P2P sync mesh
+-- `/or debug <command>` — manual test hooks for the P2P sync mesh
 -- (P2PSync.lua). It's guild-chat/whisper based, so with only one
 -- account there's no way to have two real clients talking to each
 -- other — these commands let you force sends and feed in fake
@@ -18,12 +18,12 @@ GT.DEBUG_UI_ENABLED = false
 
 local function PrintUsage()
 	print("|cffffff00[GuildThing debug]|r commands:")
-	print("  /gt debug broadcast — force a recipe broadcast now, ignoring the throttle")
-	print("  /gt debug gossip <name> — force a gossip handshake against <name>, ignoring online/cooldown checks")
-	print("  /gt debug fakemsg <name> <message> — feed a fake GUILD addon message as if <name> sent it")
-	print("  /gt debug fakewhisper <name> <message> — same, but as a WHISPER")
-	print("  /gt debug fakerecipe <name> <recipe name> — simulate <name> broadcasting that one recipe")
-	print("  /gt debug dump — print P2PData and gossip state")
+	print("  /or debug broadcast — force a recipe broadcast now, ignoring the throttle")
+	print("  /or debug gossip <name> — force a gossip handshake against <name>, ignoring online/cooldown checks")
+	print("  /or debug fakemsg <name> <message> — feed a fake GUILD addon message as if <name> sent it")
+	print("  /or debug fakewhisper <name> <message> — same, but as a WHISPER")
+	print("  /or debug fakerecipe <name> <recipe name> — simulate <name> broadcasting that one recipe")
+	print("  /or debug dump — print P2PData and gossip state")
 end
 
 local function DumpP2PData()
@@ -61,9 +61,9 @@ local function DumpP2PData()
 	end
 end
 
--- Called from UI.lua's "/gt" handler when the first word is "debug" —
+-- Called from UI.lua's "/or" handler when the first word is "debug" —
 -- kept as a public GT.* function rather than its own slash command so
--- "/gt debug" stays one discoverable entry point.
+-- "/or debug" stays one discoverable entry point.
 function GT.HandleDebugCommand(argsStr)
 	argsStr = argsStr or ""
 	local command, rest = argsStr:match("^(%S*)%s*(.-)%s*$")
@@ -75,7 +75,7 @@ function GT.HandleDebugCommand(argsStr)
 	elseif command == "gossip" then
 		local targetName = rest:match("^(%S+)")
 		if not targetName then
-			print("|cffff0000[GuildThing debug]|r usage: /gt debug gossip <name>")
+			print("|cffff0000[GuildThing debug]|r usage: /or debug gossip <name>")
 		else
 			GT.DebugForceGossip(targetName)
 			print("|cffffff00[GuildThing debug]|r sent SYN to " .. targetName)
@@ -83,7 +83,7 @@ function GT.HandleDebugCommand(argsStr)
 	elseif command == "fakemsg" or command == "fakewhisper" then
 		local fakeName, message = rest:match("^(%S+)%s+(.+)$")
 		if not fakeName then
-			print(("|cffff0000[GuildThing debug]|r usage: /gt debug %s <name> <message>"):format(command))
+			print(("|cffff0000[GuildThing debug]|r usage: /or debug %s <name> <message>"):format(command))
 		else
 			local channel = command == "fakewhisper" and "WHISPER" or "GUILD"
 			GT.DebugSimulateMessage(fakeName, message, channel)
@@ -92,7 +92,7 @@ function GT.HandleDebugCommand(argsStr)
 	elseif command == "fakerecipe" then
 		local fakeName, recipeName = rest:match("^(%S+)%s+(.+)$")
 		if not fakeName then
-			print("|cffff0000[GuildThing debug]|r usage: /gt debug fakerecipe <name> <recipe name>")
+			print("|cffff0000[GuildThing debug]|r usage: /or debug fakerecipe <name> <recipe name>")
 		else
 			GT.DebugFakeRecipeBroadcast(fakeName, recipeName)
 			print(("|cffffff00[GuildThing debug]|r simulated %s broadcasting: %s"):format(fakeName, recipeName))
