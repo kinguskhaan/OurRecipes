@@ -8,6 +8,10 @@ WoW TBC Anniversary addon for browsing and sharing who in your guild knows which
 
 Drop the addon folder into `Interface/AddOns/`.
 
+you can also download the addon via curseforge:
+https://www.curseforge.com/wow/addons/ourrecipes
+
+
 ## Our Instructions
 
 `/or` or `/ourrecipes` to open the window.
