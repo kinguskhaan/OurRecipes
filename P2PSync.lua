@@ -194,11 +194,10 @@ end
 -- ASK response — JSON -> zlib -> Base64 -> 230-char chunks. subjectName
 -- is only set for an ASK response, where we're relaying someone ELSE's
 -- cached data rather than sending our own (see HandleCompletePayload).
+-- ids may be empty (a professionless sender) — still sent, not skipped,
+-- so that sender gets a real P2PData entry on the receiving end and can
+-- take part in gossip as a peer, not just a silent broadcast listener.
 local function ChunksFromIDs(ids, class, subjectName)
-	if #ids == 0 then
-		return nil
-	end
-
 	local payload = { c = class, ids = ids, s = subjectName }
 	local json = GuildThing_JSON:encode(payload)
 	local compressed = LibDeflate:CompressZlib(json)
@@ -237,9 +236,6 @@ local function TryBroadcastSelfRecipes(force)
 	end
 
 	local ids = CollectSelfKnownSpellIDs()
-	if #ids == 0 then
-		return
-	end
 	table.sort(ids)
 	local signature = table.concat(ids, ",")
 
