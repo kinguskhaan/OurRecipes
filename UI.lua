@@ -755,8 +755,13 @@ local function BuildOverviewPage(parent)
 
             -- Highest rank among the professions actually relevant to the
             -- current view (the active filters, or all of them if none are
-            -- set) — drives the sort below, highest first.
+            -- set) — drives the sort below, highest first. hasData is
+            -- scoped the same way: true if any relevant profession has
+            -- actual recipe data (count > 0), not just a known rank — so
+            -- "(no data)" entries sink below real data within the same
+            -- filter, not just within their raw skill rank.
             local sortRank = 0
+            local hasData = false
 
             if #summary > 0 then
                 -- Default (no filters active) shows anyone with at least
@@ -769,6 +774,9 @@ local function BuildOverviewPage(parent)
                         matchesFilter = true
                         if s.rank and s.rank > sortRank then
                             sortRank = s.rank
+                        end
+                        if s.count > 0 then
+                            hasData = true
                         end
                     end
                 end
@@ -793,6 +801,7 @@ local function BuildOverviewPage(parent)
                     sub = #profTags > 0 and table.concat(profTags, ", ") or "no professions known",
                     r = r, g = g, b = b,
                     sortRank = sortRank,
+                    hasData = hasData,
                     searchScore = searchScore,
                     onClick = function() ShowCharacter(char) end,
                 })
@@ -809,10 +818,14 @@ local function BuildOverviewPage(parent)
                 return a.name:lower() < b.name:lower()
             end)
         else
-            -- No search: highest rank first (relevant-to-current-filter
-            -- rank, see above), alphabetical as a tiebreak / for those with
-            -- no rank at all.
+            -- No search: has-data first (real recipe data before "(no
+            -- data)"/rank-only entries), then highest rank
+            -- (relevant-to-current-filter rank, see above), alphabetical as
+            -- a final tiebreak.
             table.sort(items, function(a, b)
+                if a.hasData ~= b.hasData then
+                    return a.hasData
+                end
                 if a.sortRank ~= b.sortRank then
                     return a.sortRank > b.sortRank
                 end
