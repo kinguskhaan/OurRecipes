@@ -71,6 +71,24 @@ local ADDON_PREFIX = "GT_RECIPES"
 local CHUNK_BODY_LIMIT = 230 -- addon messages cap at 255 chars; header eats ~16-25
 local SEQ_WRAP = 100
 
+-- Every send funnels through here. Nothing should ever actually hit the
+-- 255-char cap (control messages are fixed-format, data payloads are
+-- pre-chunked to CHUNK_BODY_LIMIT above) — this is just the one place
+-- that would notice and drop it if that assumption ever broke, instead
+-- of the message silently vanishing into the client with no trace.
+local function SafeSendAddonMessage(prio, message, chatType, target)
+	if #message > 255 then
+		print(
+			("|cffff0000[GuildThing]|r dropped oversized addon message (%d bytes > 255): %s..."):format(
+				#message,
+				message:sub(1, 40)
+			)
+		)
+		return
+	end
+	ChatThrottleLib:SendAddonMessage(prio, ADDON_PREFIX, message, chatType, target)
+end
+
 -----------------------------
 -- P2P SETTINGS (user-configurable) --
 -----------------------------
@@ -222,7 +240,7 @@ local function SendChunks(chunks, chatType, target)
 	local total = #chunks
 	for i, chunk in ipairs(chunks) do
 		local header = string.format("%d:%d:%d:", seq, i, total)
-		ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, header .. chunk, chatType, target)
+		SafeSendAddonMessage("BULK", header .. chunk, chatType, target)
 	end
 end
 
@@ -454,7 +472,7 @@ local function TryGossipHandshake()
 	local state = GetGossipState()
 	state[GT.ClubScanKey(partner, GetRealmName())] = time()
 
-	ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, "SYN:" .. BuildCombinedHash(), "WHISPER", partner)
+	SafeSendAddonMessage("BULK", "SYN:" .. BuildCombinedHash(), "WHISPER", partner)
 end
 
 local function ScheduleGossipHandshake()
@@ -468,15 +486,9 @@ end
 -- from theirs (see OnAckDigest for the other half of that exchange).
 local function OnSyn(senderName, theirHash)
 	if tostring(BuildCombinedHash()) == theirHash then
-		ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, "ACKM", "WHISPER", senderName)
+		SafeSendAddonMessage("BULK", "ACKM", "WHISPER", senderName)
 	else
-		ChatThrottleLib:SendAddonMessage(
-			"BULK",
-			ADDON_PREFIX,
-			"ACKD:" .. BuildDigestRows(DIGEST_ROW_LIMIT),
-			"WHISPER",
-			senderName
-		)
+		SafeSendAddonMessage("BULK", "ACKD:" .. BuildDigestRows(DIGEST_ROW_LIMIT), "WHISPER", senderName)
 	end
 end
 
@@ -489,7 +501,7 @@ local function OnAckDigest(senderName, rowsStr)
 		local ownEntry = GuildThingDB.P2PData and GuildThingDB.P2PData[key]
 		local ownHash = ownEntry and tostring(EntrySignatureHash(ownEntry))
 		if ownHash ~= row.hash then
-			ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, "ASKQ:" .. row.name, "WHISPER", senderName)
+			SafeSendAddonMessage("BULK", "ASKQ:" .. row.name, "WHISPER", senderName)
 		end
 	end
 end
@@ -747,7 +759,7 @@ function GT.DebugForceBroadcast()
 end
 
 function GT.DebugForceGossip(targetName)
-	ChatThrottleLib:SendAddonMessage("BULK", ADDON_PREFIX, "SYN:" .. BuildCombinedHash(), "WHISPER", targetName)
+	SafeSendAddonMessage("BULK", "SYN:" .. BuildCombinedHash(), "WHISPER", targetName)
 end
 
 -- Exposes the otherwise-local BuildCombinedHash so a debug SYN can be
