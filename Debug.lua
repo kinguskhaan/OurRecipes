@@ -31,6 +31,7 @@ local function PrintUsage()
 	print("  /or debug fakewhisper <name> <message> — same, but as a WHISPER")
 	print("  /or debug fakerecipe <name> <recipe name> — simulate <name> broadcasting that one recipe")
 	print("  /or debug dump — print P2PData and gossip state")
+	print("  /or debug resetprofessions — clear this character's scanned professions")
 end
 
 local function DumpP2PData()
@@ -72,6 +73,10 @@ end
 -- visualizer (UI.lua's BuildPeerVisualizerPage), so it reads the same
 -- shape as this file's own dump above instead of a second copy drifting
 -- out of sync.
+local function FormatTimestamp(ts)
+	return ts and date("%Y-%m-%d %H:%M:%S", ts) or nil
+end
+
 function GT.BuildP2PDataSnapshot()
 	local peers = {}
 	for key, entry in pairs(GuildThingDB.P2PData or {}) do
@@ -93,13 +98,49 @@ function GT.BuildP2PDataSnapshot()
 
 	local gossipState = {}
 	for key, lastSynced in pairs(GuildThingDB.P2PGossipState or {}) do
-		gossipState[key] = date("%Y-%m-%d %H:%M:%S", lastSynced)
+		gossipState[key] = FormatTimestamp(lastSynced)
+	end
+
+	-- Own broadcast: a threshold, not a schedule (see GT.GetSelfBroadcastInfo)
+	-- — earliestNextBroadcastAt is when a broadcast becomes *eligible*
+	-- again, not when one will actually fire.
+	local selfBroadcast = GT.GetSelfBroadcastInfo()
+	selfBroadcast.lastSentAt = FormatTimestamp(selfBroadcast.lastSentAt)
+	selfBroadcast.earliestNextBroadcastAt = FormatTimestamp(selfBroadcast.earliestNextBroadcastAt)
+
+	-- Gossip: this one IS a real recurring timer (hourly), so nextRoundAt
+	-- is an actual prediction, not just a threshold.
+	local gossip = GT.GetGossipRuntimeInfo()
+	gossip.lastRoundAt = FormatTimestamp(gossip.lastRoundAt)
+	gossip.nextRoundAt = FormatTimestamp(gossip.nextRoundAt)
+
+	-- Raw + completed message logs, newest last. isHello on a completed
+	-- entry means it arrived as a WHISPER of someone's own (non-relayed)
+	-- data — see HandleCompletePayload in P2PSync.lua.
+	local trafficLog = GT.GetP2PTrafficLog()
+	local raw = {}
+	for _, entry in ipairs(trafficLog.raw) do
+		table.insert(raw, { at = FormatTimestamp(entry.at), from = entry.from, channel = entry.channel })
+	end
+	local completed = {}
+	for _, entry in ipairs(trafficLog.completed) do
+		table.insert(completed, {
+			at = FormatTimestamp(entry.at),
+			from = entry.from,
+			channel = entry.channel,
+			subject = entry.subject,
+			isHello = entry.isHello,
+		})
 	end
 
 	return {
 		peerCount = #peers,
 		peers = peers,
-		gossipState = gossipState,
+		gossipPartnerCooldowns = gossipState,
+		selfBroadcast = selfBroadcast,
+		gossip = gossip,
+		helloQueue = GT.GetHelloQueueSnapshot(),
+		traffic = { raw = raw, completed = completed },
 	}
 end
 
@@ -141,6 +182,9 @@ function GT.HandleDebugCommand(argsStr)
 		end
 	elseif command == "dump" then
 		DumpP2PData()
+	elseif command == "resetprofessions" then
+		GT.DebugResetOwnProfessions()
+		print("|cffffff00[GuildThing debug]|r cleared this character's scanned professions")
 	else
 		PrintUsage()
 	end

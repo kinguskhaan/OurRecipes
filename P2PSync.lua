@@ -277,6 +277,21 @@ local function TryBroadcastSelfRecipes(force)
 	entry.p2pLastSentAt = time()
 end
 
+-- Broadcast scheduling info for the Peer data page (UI.lua) — note this
+-- is a threshold, not a timer: nothing actually re-sends until the next
+-- PLAYER_LOGIN, GT.SaveProfession call, or manual force (Settings page
+-- "Force broadcast now" / /or debug broadcast) happens to land after it.
+function GT.GetSelfBroadcastInfo()
+	local entry = GuildThingDB[GT.CharKey()]
+	local lastSentAt = entry and entry.p2pLastSentAt
+	local intervalSeconds = GetResendIntervalSeconds()
+	return {
+		lastSentAt = lastSentAt,
+		resendIntervalSeconds = intervalSeconds,
+		earliestNextBroadcastAt = lastSentAt and (lastSentAt + intervalSeconds) or nil,
+	}
+end
+
 -----------------------------
 -- REACTIVE HELLO --
 -----------------------------
@@ -475,9 +490,39 @@ local function TryGossipHandshake()
 	SafeSendAddonMessage("BULK", "SYN:" .. BuildCombinedHash(), "WHISPER", partner)
 end
 
+-- Timestamp of the most recent gossip round, whether or not a partner
+-- was actually found — the Peer data page (UI.lua, via
+-- GT.GetGossipRuntimeInfo below) uses this plus GOSSIP_INTERVAL_SECONDS
+-- to show when the next one is due. Session-only, not persisted: it's a
+-- recursive C_Timer chain, not a saved schedule, and resets on reload.
+local lastGossipRoundAt = nil
+
 local function ScheduleGossipHandshake()
+	lastGossipRoundAt = time()
 	TryGossipHandshake()
 	C_Timer.After(GOSSIP_INTERVAL_SECONDS, ScheduleGossipHandshake)
+end
+
+function GT.GetGossipRuntimeInfo()
+	return {
+		intervalSeconds = GOSSIP_INTERVAL_SECONDS,
+		lastRoundAt = lastGossipRoundAt,
+		nextRoundAt = lastGossipRoundAt and (lastGossipRoundAt + GOSSIP_INTERVAL_SECONDS) or nil,
+	}
+end
+
+-- Snapshot of who's still waiting for their reactive-hello reply — see
+-- QueueHello/DrainHelloQueue above. Pending names in send order, oldest
+-- (next to drain) first.
+function GT.GetHelloQueueSnapshot()
+	local pending = {}
+	for _, name in ipairs(helloQueue) do
+		table.insert(pending, name)
+	end
+	return {
+		staggerSeconds = HELLO_STAGGER_SECONDS,
+		pending = pending,
+	}
 end
 
 -- Someone whispered us their combined hash. Matching means we already
@@ -559,6 +604,31 @@ end
 -- broadcast was previously in-flight from them.
 local pendingChunks = {}
 
+-- Diagnostic-only, session-local logs surfaced on the Peer data page
+-- (UI.lua) for troubleshooting "is this actually working" — e.g. 0
+-- known peers despite other people having the addon installed. rawLog
+-- records every addon message heard from someone else regardless of
+-- type or whether it ever fully assembled, so "did anything even
+-- arrive" is answerable without guessing; completedLog records only
+-- payloads that fully decoded, tagged so a reactive hello (isHello:
+-- a WHISPER of someone's own data, unprompted — see SendHelloTo, the
+-- only sender that omits payload.s) is distinguishable from a broadcast
+-- or an ASK reply relaying a third party.
+local MAX_LOG_ENTRIES = 15
+local rawMessageLog = {}
+local completedPayloadLog = {}
+
+local function PushLog(log, entry)
+	table.insert(log, entry)
+	while #log > MAX_LOG_ENTRIES do
+		table.remove(log, 1)
+	end
+end
+
+function GT.GetP2PTrafficLog()
+	return { raw = rawMessageLog, completed = completedPayloadLog }
+end
+
 -- Reverse of TryBroadcastSelfRecipes' send pipeline: Base64 -> zlib ->
 -- JSON -> spellID list -> recipe names. Stored under the SENDER's
 -- name-realm key normally — but payload.s (only set on an ASK reply,
@@ -569,7 +639,7 @@ local pendingChunks = {}
 -- correct even if the relayed copy turns out to be the staler one. Any
 -- decode step failing (corrupt/partial data) just drops the payload
 -- silently, never touches our own saved data.
-local function HandleCompletePayload(senderName, blob)
+local function HandleCompletePayload(senderName, blob, channel)
 	local decodeOk, compressed = pcall(GuildThing_Base64.decode, blob)
 	if not decodeOk or not compressed then
 		return
@@ -588,6 +658,14 @@ local function HandleCompletePayload(senderName, blob)
 	if not jsonOk or type(payload) ~= "table" or type(payload.ids) ~= "table" then
 		return
 	end
+
+	PushLog(completedPayloadLog, {
+		at = time(),
+		from = senderName,
+		channel = channel,
+		subject = payload.s or senderName,
+		isHello = channel == "WHISPER" and not payload.s,
+	})
 
 	local subjectName = payload.s or senderName
 	GuildThingDB.P2PData = GuildThingDB.P2PData or {}
@@ -630,6 +708,8 @@ local function OnAddonMessage(prefix, message, channel, sender)
 	if string.lower(senderName) == string.lower(UnitName("player")) then
 		return
 	end -- ignore our own broadcast, if it ever echoes
+
+	PushLog(rawMessageLog, { at = time(), from = senderName, channel = channel })
 
 	-- Only a GUILD broadcast can trigger a hello — never a WHISPER, or
 	-- two strangers who don't know each other could whisper back and
@@ -677,7 +757,7 @@ local function OnAddonMessage(prefix, message, channel, sender)
 			table.insert(parts, buffer.chunks[i])
 		end
 		pendingChunks[senderName] = nil
-		HandleCompletePayload(senderName, table.concat(parts))
+		HandleCompletePayload(senderName, table.concat(parts), channel)
 	end
 end
 

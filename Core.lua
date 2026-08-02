@@ -24,6 +24,16 @@ local function GetCharEntry()
     return entry
 end
 
+-- Developer-only reset, wired from Debug.lua's HandleDebugCommand / the
+-- Debug page button — clears this character's scanned profession data so
+-- the Overview "no imported professions" banner (UI.lua) can be tested
+-- without actually forgetting a real profession in-game.
+function GT.DebugResetOwnProfessions()
+    local entry = GetCharEntry()
+    entry.professions = {}
+    GT.InvalidateProfessionSummaryCacheFor(entry.name, entry.realm)
+end
+
 function GT.SaveProfession(skillName, recipes)
     local entry = GetCharEntry()
     local oldRecipes = entry.professions[skillName]

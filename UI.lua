@@ -611,6 +611,20 @@ local function BuildOverviewPage(parent)
         filterBar:SetHeight(-y + rowHeight)
     end
 
+    -- Shown on the roster (level 1) when this character has never scanned
+    -- any profession — see GT.GetProfessionNames/Core.lua's ScanTradeSkill.
+    -- A silent addon (nothing broadcast, nothing to share) otherwise looks
+    -- identical to a working one with just no data yet, which is exactly
+    -- what generated the "is this even working?" debugging session this
+    -- came out of.
+    local noProfessionWarning = page:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    noProfessionWarning:SetPoint("TOPLEFT", filterBar, "BOTTOMLEFT", 0, -6)
+    noProfessionWarning:SetPoint("RIGHT", page, "RIGHT", -12, 0)
+    noProfessionWarning:SetJustifyH("LEFT")
+    noProfessionWarning:SetTextColor(1, 0.2, 0.2)
+    noProfessionWarning:SetText("You have no imported professions. Please open your professions once so this addon can pick them up.")
+    noProfessionWarning:Hide()
+
     -- Search + sort toolbar — only shown for the per-character recipe list
     -- (character -> profession drill-down), where there's actually a known/
     -- unknown split worth searching and sorting.
@@ -844,7 +858,15 @@ local function BuildOverviewPage(parent)
         filterBar:Show()
         rosterSearchLabel:Show()
         rosterSearchBox:Show()
-        AnchorScrollBelow(filterBar, 8)
+
+        if #GT.GetProfessionNames() == 0 then
+            noProfessionWarning:Show()
+            AnchorScrollBelow(noProfessionWarning, 8)
+        else
+            noProfessionWarning:Hide()
+            AnchorScrollBelow(filterBar, 8)
+        end
+
         RebuildRoster()
     end
 
@@ -856,6 +878,7 @@ local function BuildOverviewPage(parent)
         backBtn:SetScript("OnClick", ShowRoster)
         filterBar:Hide()
         toolbar:Hide()
+        noProfessionWarning:Hide()
         AnchorScrollBelow(breadcrumb, 8)
 
         -- Whether we have (or ever had) an actual export for this character,
@@ -928,6 +951,7 @@ local function BuildOverviewPage(parent)
         backBtn:Show()
         backBtn:SetScript("OnClick", function() ShowCharacter(char) end)
         filterBar:Hide()
+        noProfessionWarning:Hide()
 
         page.currentChar = char
         page.currentProfName = profName
@@ -1228,6 +1252,13 @@ local function BuildDebugPage(parent)
 
     AddButton("Dump P2PData", function()
         GT.HandleDebugCommand("dump")
+    end)
+
+    -- Clears this character's own scanned professions — for testing the
+    -- Overview "no imported professions" banner without actually forgetting
+    -- a real profession in-game. Doesn't touch anyone else's P2PData.
+    AddButton("Reset my professions", function()
+        GT.HandleDebugCommand("resetprofessions")
     end)
 
     AddButton("Simulate testkingen (2 recipes)", function()

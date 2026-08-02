@@ -2,6 +2,23 @@
 
 All notable changes to this addon are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [0.1.0-beta.3] - 2026-08-02
+
+### Added
+
+- Red warning banner on the Overview roster when this character has never scanned a profession: "You have no imported professions. Please open your professions once so this addon can pick them up." A silent client with zero scanned professions otherwise looks identical to a working one with just no data yet.
+- Peer data page now also shows P2P scheduling/traffic info: last and next gossip round, own last/next-eligible broadcast, the pending reactive-hello queue, and a raw + completed message traffic log (who sent what, over which channel, and whether it was a reactive hello) — for diagnosing "is this actually syncing with anyone" without guessing.
+- Debug page: "Reset my professions" button, for testing the no-profession banner without actually forgetting a real profession in-game.
+
+### Changed
+
+- Interface version bumped to 20506 to match the current Anniversary client build.
+
+### Fixed
+
+- Reset-my-professions debug tool now invalidates the cached profession summary too, not just the live data — Overview's roster count no longer shows a stale known-recipe number after a reset.
+- The no-profession banner no longer follows you into a character's profession page — it only shows on the roster level now.
+
 ## [0.1.0-beta.2] - 2026-08-02
 
 ### Added
