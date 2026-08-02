@@ -954,7 +954,10 @@ end
 -- SETTINGS PAGE --
 -----------------------------
 
-local function BuildSettingsPage(parent)
+-- onDeveloperModeChanged: called right after the checkbox flips, so the
+-- sidebar's Developer section can show/hide immediately instead of
+-- waiting for the next time this page happens to refresh.
+local function BuildSettingsPage(parent, onDeveloperModeChanged)
     local page = CreateFrame("Frame", nil, parent)
     page:SetAllPoints()
 
@@ -972,7 +975,7 @@ local function BuildSettingsPage(parent)
     -- width/height have to come from SetSize, not TOPLEFT/TOPRIGHT
     -- anchors, or the child (and everything on it) ends up zero-width.
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
-    scrollChild:SetSize(page:GetWidth() - 20, 640)
+    scrollChild:SetSize(page:GetWidth() - 20, 760)
     scrollFrame:SetScrollChild(scrollChild)
 
     local title = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -1132,6 +1135,32 @@ local function BuildSettingsPage(parent)
         forceBroadcastStatus:SetText("Broadcast sent.")
     end)
 
+    -- Developer mode — gates the "Developer" sidebar section (Debug +
+    -- Peer data pages) further down in CreateGTFrame. Off by default,
+    -- meant for people poking at the P2P internals, not a regular user.
+    local devHeader = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    devHeader:SetPoint("TOPLEFT", forceBroadcastStatus, "BOTTOMLEFT", -2, -16)
+    devHeader:SetText("Advanced")
+
+    local developerCheck = CreateFrame("CheckButton", nil, scrollChild, "UICheckButtonTemplate")
+    developerCheck:SetSize(20, 20)
+    developerCheck:SetPoint("TOPLEFT", devHeader, "BOTTOMLEFT", 0, -8)
+
+    local developerLabel = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    developerLabel:SetPoint("LEFT", developerCheck, "RIGHT", 2, 0)
+    developerLabel:SetText("Developer mode")
+
+    local developerHint = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    developerHint:SetPoint("TOPLEFT", developerCheck, "BOTTOMLEFT", 2, -4)
+    developerHint:SetPoint("RIGHT", scrollChild, "RIGHT", -12, 0)
+    developerHint:SetJustifyH("LEFT")
+    developerHint:SetText("Adds a \"Developer\" section to the sidebar: manual P2P test tools and a live dump of the peer cache.")
+
+    developerCheck:SetScript("OnClick", function(self)
+        GT.SetDeveloperMode(self:GetChecked())
+        if onDeveloperModeChanged then onDeveloperModeChanged() end
+    end)
+
     page.Refresh = function()
         minimapCheck:SetChecked(not GuildThingDB.minimap.hide)
         announceIntervalBox.Refresh()
@@ -1139,6 +1168,7 @@ local function BuildSettingsPage(parent)
         RefreshEffectiveStatus()
         pruneStatus:SetText("")
         forceBroadcastStatus:SetText("")
+        developerCheck:SetChecked(GT.IsDeveloperModeEnabled())
     end
 
     return page
@@ -1147,12 +1177,13 @@ end
 -----------------------------
 -- DEBUG PAGE --
 -----------------------------
--- Only reachable if GT.DEBUG_UI_ENABLED is flipped on in Debug.lua (see
--- CreateGTFrame below, which gates the sidebar entry on it). Every button
--- here just forwards a string to GT.HandleDebugCommand — the exact same
--- entry point /or debug already uses — so a button click is always 1:1
--- with typing the equivalent command, never a second code path to drift
--- out of sync with the real thing.
+-- Only reachable if Developer mode is on (Settings page, persisted via
+-- GT.IsDeveloperModeEnabled — see CreateGTFrame below, which gates the
+-- sidebar's Developer section on it). Every button here just forwards a
+-- string to GT.HandleDebugCommand — the exact same entry point /or debug
+-- already uses — so a button click is always 1:1 with typing the
+-- equivalent command, never a second code path to drift out of sync with
+-- the real thing.
 
 -- First `count` catalog recipes (that resolve to a real spellID) for
 -- profName, comma-joined — same trick as the /run snippet used to solo-test
@@ -1239,6 +1270,45 @@ local function BuildDebugPage(parent)
     runBtn:SetScript("OnClick", RunCmdBox)
     cmdBox:SetScript("OnEnterPressed", RunCmdBox)
 
+    return page
+end
+
+-----------------------------
+-- PEER DATA PAGE --
+-----------------------------
+-- Developer-only, same gating as the Debug page above. Read-only
+-- pretty-printed JSON dump of GuildThingDB.P2PData (and gossip state) —
+-- the actual wire-level cache this character has built up, for
+-- inspecting it directly instead of one line at a time via /or debug dump.
+local function BuildPeerVisualizerPage(parent)
+    local page = CreateFrame("Frame", nil, parent)
+    page:SetAllPoints()
+
+    local title = page:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    title:SetPoint("TOPLEFT", 4, -4)
+    title:SetText("Peer data")
+
+    local hint = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    hint:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
+    hint:SetText("Live snapshot of GuildThingDB.P2PData — what this character has learned about the guild.")
+
+    local refreshBtn = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+    refreshBtn:SetSize(80, 22)
+    refreshBtn:SetPoint("TOPLEFT", hint, "BOTTOMLEFT", 0, -8)
+    refreshBtn:SetText("Refresh")
+
+    local box, editBox = CreateTextBox(page, TEXTBOX_WIDTH, 320, true)
+    box:SetPoint("TOPLEFT", refreshBtn, "BOTTOMLEFT", 0, -8)
+
+    local function RefreshDump()
+        local snapshot = GT.BuildP2PDataSnapshot()
+        local json = GuildThing_JSON:encode_pretty(snapshot)
+        editBox.lastSetText = json
+        editBox:SetText(json)
+    end
+    refreshBtn:SetScript("OnClick", RefreshDump)
+
+    page.Refresh = RefreshDump
     return page
 end
 
@@ -1345,8 +1415,7 @@ local function CreateGTFrame()
         previousAnchor = btn
     end
 
-    -- Options section — Settings and Import/Export always live here; Debug
-    -- only if GT.DEBUG_UI_ENABLED (Debug.lua) is manually flipped on.
+    -- Options section — Settings and Import/Export always live here.
     local optionsHeader = sidebar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     optionsHeader:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", 8, -10)
     optionsHeader:SetTextColor(0.6, 0.6, 0.6)
@@ -1366,14 +1435,26 @@ local function CreateGTFrame()
     table.insert(sidebarButtons, importExportBtn)
     previousAnchor = importExportBtn
 
-    local debugBtn
-    if GT.DEBUG_UI_ENABLED then
-        debugBtn = CreateSidebarButton(sidebar)
-        debugBtn:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", 0, -4)
-        debugBtn:SetPoint("RIGHT", sidebar, "RIGHT", 0, 0)
-        debugBtn.label:SetText("Debug")
-        table.insert(sidebarButtons, debugBtn)
-    end
+    -- Developer section — its own heading, shown/hidden as a whole based
+    -- on the "Developer mode" checkbox on the Settings page. Always
+    -- built (nothing else is anchored below it, so hiding it is safe),
+    -- just not shown unless GT.IsDeveloperModeEnabled().
+    local developerHeader = sidebar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    developerHeader:SetPoint("TOPLEFT", previousAnchor, "BOTTOMLEFT", 8, -10)
+    developerHeader:SetTextColor(0.6, 0.6, 0.6)
+    developerHeader:SetText("Developer")
+
+    local debugBtn = CreateSidebarButton(sidebar)
+    debugBtn:SetPoint("TOPLEFT", developerHeader, "BOTTOMLEFT", -8, -4)
+    debugBtn:SetPoint("RIGHT", sidebar, "RIGHT", 0, 0)
+    debugBtn.label:SetText("Debug")
+    table.insert(sidebarButtons, debugBtn)
+
+    local peersBtn = CreateSidebarButton(sidebar)
+    peersBtn:SetPoint("TOPLEFT", debugBtn, "BOTTOMLEFT", 0, -4)
+    peersBtn:SetPoint("RIGHT", sidebar, "RIGHT", 0, 0)
+    peersBtn.label:SetText("Peer data")
+    table.insert(sidebarButtons, peersBtn)
 
     -- Content pane
     local content = CreateFrame("Frame", nil, f)
@@ -1383,8 +1464,15 @@ local function CreateGTFrame()
     local importExportPage = BuildImportExportPage(content)
     local professionPage = BuildProfessionPage(content)
     local overviewPage = BuildOverviewPage(content)
-    local settingsPage = BuildSettingsPage(content)
-    local debugPage = GT.DEBUG_UI_ENABLED and BuildDebugPage(content) or nil
+    local debugPage = BuildDebugPage(content)
+    local peerVisualizerPage = BuildPeerVisualizerPage(content)
+
+    -- Forward-declared: BuildSettingsPage needs a callback that isn't
+    -- defined until after SelectSidebar/ShowPage below, but the closure
+    -- passed in now still sees the real function once it's assigned —
+    -- Lua upvalues are by reference, not by value at closure-creation time.
+    local UpdateDeveloperVisibility
+    local settingsPage = BuildSettingsPage(content, function() UpdateDeveloperVisibility() end)
 
     local function SelectSidebar(selectedBtn)
         for _, btn in ipairs(sidebarButtons) do
@@ -1398,8 +1486,24 @@ local function CreateGTFrame()
         professionPage:Hide()
         overviewPage:Hide()
         settingsPage:Hide()
-        if debugPage then debugPage:Hide() end
+        debugPage:Hide()
+        peerVisualizerPage:Hide()
         page:Show()
+    end
+
+    UpdateDeveloperVisibility = function()
+        local enabled = GT.IsDeveloperModeEnabled()
+        developerHeader:SetShown(enabled)
+        debugBtn:SetShown(enabled)
+        peersBtn:SetShown(enabled)
+        -- Toggled off while looking at a page that just disappeared from
+        -- the sidebar — fall back to Overview instead of leaving an
+        -- unreachable page on screen.
+        if not enabled and (debugBtn.isSelected or peersBtn.isSelected) then
+            SelectSidebar(overviewBtn)
+            ShowPage(overviewPage)
+            overviewPage.ShowRoster()
+        end
     end
 
     settingsBtn:SetScript("OnClick", function()
@@ -1430,12 +1534,16 @@ local function CreateGTFrame()
         end
     end
 
-    if debugBtn then
-        debugBtn:SetScript("OnClick", function()
-            SelectSidebar(debugBtn)
-            ShowPage(debugPage)
-        end)
-    end
+    debugBtn:SetScript("OnClick", function()
+        SelectSidebar(debugBtn)
+        ShowPage(debugPage)
+    end)
+
+    peersBtn:SetScript("OnClick", function()
+        SelectSidebar(peersBtn)
+        ShowPage(peerVisualizerPage)
+        peerVisualizerPage.Refresh()
+    end)
 
     f.RefreshProfessionPage = function()
         if professionPage.currentProfession then
@@ -1444,10 +1552,13 @@ local function CreateGTFrame()
     end
 
     f:SetScript("OnShow", function()
+        UpdateDeveloperVisibility()
         SelectSidebar(overviewBtn)
         ShowPage(overviewPage)
         overviewPage.ShowRoster()
     end)
+
+    UpdateDeveloperVisibility()
 
     -- Frames are shown by default on creation; without this the very first
     -- `/or` would create-then-immediately-hide (ToggleGTFrame sees it as

@@ -1,11 +1,18 @@
 local GT = GuildThing
 
--- Flip to true to show the "Settings > Debug" page in the addon UI
--- (buttons for the commands below, see UI.lua's BuildDebugPage). Never
--- ship this on — it's a developer-only escape hatch, not something a
--- regular user should stumble into. Slash commands (/or debug ...) work
--- regardless of this flag either way.
-GT.DEBUG_UI_ENABLED = false
+-- Persisted toggle for the "Developer" sidebar section in the addon UI
+-- (Debug + Peer data pages, see UI.lua) — flipped from Settings, off by
+-- default. Slash commands (/or debug ...) work regardless of this either
+-- way; this only gates whether the UI section is visible.
+GuildThingDB.developerMode = GuildThingDB.developerMode or false
+
+function GT.IsDeveloperModeEnabled()
+	return GuildThingDB.developerMode
+end
+
+function GT.SetDeveloperMode(enabled)
+	GuildThingDB.developerMode = enabled and true or false
+end
 
 -----------------------------
 -- P2P DEBUG TOOLS --
@@ -59,6 +66,41 @@ local function DumpP2PData()
 	if stateCount == 0 then
 		print("  (empty)")
 	end
+end
+
+-- Plain-data snapshot of the P2P cache — shared by the in-UI peer
+-- visualizer (UI.lua's BuildPeerVisualizerPage), so it reads the same
+-- shape as this file's own dump above instead of a second copy drifting
+-- out of sync.
+function GT.BuildP2PDataSnapshot()
+	local peers = {}
+	for key, entry in pairs(GuildThingDB.P2PData or {}) do
+		local recipeNames = {}
+		for name in pairs(entry.recipeNames or {}) do
+			table.insert(recipeNames, name)
+		end
+		table.sort(recipeNames)
+		table.insert(peers, {
+			key = key,
+			name = entry.name,
+			class = entry.class,
+			receivedAt = entry.receivedAt and date("%Y-%m-%d %H:%M:%S", entry.receivedAt) or nil,
+			recipeCount = #recipeNames,
+			recipes = recipeNames,
+		})
+	end
+	table.sort(peers, function(a, b) return (a.name or a.key) < (b.name or b.key) end)
+
+	local gossipState = {}
+	for key, lastSynced in pairs(GuildThingDB.P2PGossipState or {}) do
+		gossipState[key] = date("%Y-%m-%d %H:%M:%S", lastSynced)
+	end
+
+	return {
+		peerCount = #peers,
+		peers = peers,
+		gossipState = gossipState,
+	}
 end
 
 -- Called from UI.lua's "/or" handler when the first word is "debug" —
