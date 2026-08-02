@@ -388,6 +388,33 @@ end
 -- CATALOG / PROFESSION DATA ACCESS --
 -----------------------------
 
+-- This character's catalogued professions (GuildThing_CatalogOrder) that
+-- are known but haven't been scanned yet. spellID is looked up live via
+-- GetSpellInfo(profName) rather than a hardcoded ID table — confirmed by
+-- testing that Anniversary's spell IDs for profession-opening spells
+-- don't match old classic/TBC-era numbering at all (e.g. Enchanting is
+-- 28029 here, not the original 7411), almost certainly a side effect of
+-- running on the same modern shared client build as retail. Resolving by
+-- name instead sidesteps needing to know the "right" ID for whatever
+-- build this actually is. GetSpellInfo/IsSpellKnown both need the
+-- LOCALIZED name to resolve correctly, same as entry.professions'
+-- keys — on an English client both line up with these English catalog
+-- names; on any other client neither will, so this whole feature and
+-- the "already scanned" check both silently no-op there. That's the
+-- same underlying locale gap as the recipe/spellID matching elsewhere,
+-- not a new one introduced here.
+function GT.GetUnscannedPrimaryProfessions()
+    local entry = GetCharEntry()
+    local names = {}
+    for _, profName in ipairs(GuildThing_CatalogOrder or {}) do
+        local spellID = select(7, GetSpellInfo(profName))
+        if spellID and IsSpellKnown(spellID) and not entry.professions[profName] then
+            table.insert(names, { name = profName, spellID = spellID })
+        end
+    end
+    return names
+end
+
 -- Professions THIS character has actually scanned locally (may be a subset
 -- of the full catalog below).
 function GT.GetProfessionNames()
@@ -525,7 +552,15 @@ function GT.GetRoster()
     local seen = {}
 
     local function addEntry(name, realm, class, isSelf)
-        local key = string.lower((name or "") .. "-" .. (realm or ""))
+        -- name ultimately comes from network data (P2PData) or a pasted
+        -- import (GuildData) — a malformed/corrupt entry (e.g. a non-string
+        -- name) would crash the table.sort below (":lower()" on a number)
+        -- and isn't displayable anyway, so drop it here rather than at the
+        -- crash site.
+        if type(name) ~= "string" or name == "" then
+            return
+        end
+        local key = string.lower(name .. "-" .. (realm or ""))
         if seen[key] then return end
         seen[key] = true
         table.insert(roster, { name = name, realm = realm, class = class, isSelf = isSelf })

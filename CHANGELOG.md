@@ -2,6 +2,22 @@
 
 All notable changes to this addon are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [0.1.0-beta.5] - 2026-08-03
+
+### Added
+
+- Overview: up to 3 "Open <profession>" buttons for any catalogued profession you know but haven't scanned yet (Alchemy/Blacksmithing/Enchanting/Engineering/Jewelcrafting/Leatherworking/Tailoring/Cooking) — one click opens that profession's window via `CastSpellByID`, letting the existing scan-on-open hook pick it up, instead of needing to find and open it yourself. Buttons disappear per-profession once scanned; Overview now also refreshes itself automatically right after a scan completes (no more manual re-click or `/reload` needed to see the result).
+- Settings: collapsible "Known peers" list — a plain-language, always-available (not Developer-mode-gated) answer to "who am I actually syncing with", showing name/class/recipe count per peer.
+- Peer data page's "Copy to clipboard" button renamed to "Highlight text" — WoW addons have no real clipboard API, it only ever selected the text for a manual Ctrl+C.
+
+### Fixed
+
+- A completed P2P payload with a non-string `s` field (seen in the wild from a real peer, cause unconfirmed) got used directly as that peer's name, producing entries like `P2PData["1-realm"]` with `name = 1` — which then crashed Overview's roster sort (`:lower()` on a number) and, since a numeric "name" never matches a real guild member, got immediately auto-pruned every roster update before it could ever be seen. `payload.s` is now validated as a string before use; `GT.GetRoster` also drops any non-string-named entry defensively, so an already-corrupted saved entry can't crash the client either.
+- `GT.PruneDepartedPeers()` (runs automatically on every `GUILD_ROSTER_UPDATE`) had no guard against firing before the server had actually sent the full guild roster after login/reload — `GetNumGuildMembers()` reading 0 in that window made every real peer look departed and wiped the entire P2P cache on login. Now skips pruning entirely when the roster reads as empty, since a real guild always has at least the player as a member.
+- The "Open <profession>" feature's original design (`GetProfessions()` + `CastSpellByName`) turned out to be unreliable on this client build — `GetProfessions()` returned nil for both profession slots despite the character having real trained professions, and hardcoded classic/TBC-era profession spell IDs didn't match this build's numbering at all. Replaced with a live `GetSpellInfo(professionName)` + `IsSpellKnown` + `CastSpellByID` lookup instead of guessing IDs.
+- Fixed the buttons briefly overlapping/rendering behind the roster list right after appearing — the scroll list's anchor was computed against the warning banner even when the (lower) buttons were also visible.
+- Debug page's "Reset my professions" button wasn't wired to the same auto-refresh as a real scan, so Overview (and the "Open <profession>" buttons) could show stale state until manually navigated away and back.
+
 ## [0.1.0-beta.4] - 2026-08-02
 
 ### Fixed

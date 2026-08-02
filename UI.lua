@@ -625,6 +625,52 @@ local function BuildOverviewPage(parent)
     noProfessionWarning:SetText("You have no imported professions. Please open your professions once so this addon can pick them up.")
     noProfessionWarning:Hide()
 
+    -- One button per unscanned known profession (GT.GetUnscannedPrimaryProfessions,
+    -- Core.lua) — opens it via CastSpellByID so the existing TRADE_SKILL_SHOW
+    -- scan hook picks it up, same as opening it manually. One button per
+    -- profession rather than one button that opens all of them: CastSpellByID
+    -- only runs as a protected action when called directly from a real click,
+    -- so queuing several casts (even a moment apart) off the same click would
+    -- risk getting blocked — a separate real click per profession sidesteps
+    -- that entirely. Up to 3: the realistic max known at once (2 primary +
+    -- Cooking, the only secondary profession this addon catalogs — see
+    -- GuildThing_CatalogOrder). Hidden per-button once that profession's
+    -- been scanned (RefreshOpenProfessionButtons).
+    local openProfessionButtons = {}
+    local previousOpenProfessionAnchor = noProfessionWarning
+    for i = 1, 3 do
+        local btn = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+        btn:SetSize(160, 22)
+        btn:SetPoint("TOPLEFT", previousOpenProfessionAnchor, "BOTTOMLEFT", 0, i == 1 and -6 or -4)
+        btn:SetScript("OnClick", function(self)
+            if InCombatLockdown() then
+                print("|cffff0000[GuildThing]|r can't open a profession window while in combat.")
+                return
+            end
+            CastSpellByID(self.professionSpellID)
+        end)
+        btn:Hide()
+        openProfessionButtons[i] = btn
+        previousOpenProfessionAnchor = btn
+    end
+
+    -- Returns how many buttons ended up visible (0-3), so callers can anchor
+    -- whatever comes next below the last one actually shown.
+    local function RefreshOpenProfessionButtons()
+        local unscanned = GT.GetUnscannedPrimaryProfessions()
+        for i, btn in ipairs(openProfessionButtons) do
+            local prof = unscanned[i]
+            if prof then
+                btn.professionSpellID = prof.spellID
+                btn:SetText("Open " .. prof.name)
+                btn:Show()
+            else
+                btn:Hide()
+            end
+        end
+        return math.min(#unscanned, #openProfessionButtons)
+    end
+
     -- Search + sort toolbar — only shown for the per-character recipe list
     -- (character -> profession drill-down), where there's actually a known/
     -- unknown split worth searching and sorting.
@@ -852,6 +898,11 @@ local function BuildOverviewPage(parent)
     end
 
     ShowRoster = function()
+        -- Tracked so GT.SaveProfession's auto-refresh hook (CreateGTFrame,
+        -- below) knows it's safe to re-run ShowRoster — doing that while
+        -- the user is drilled into a character/profession would yank them
+        -- back out to the roster mid-browse.
+        page.atRosterLevel = true
         breadcrumb:SetText("All guild members")
         backBtn:Hide()
         toolbar:Hide()
@@ -859,11 +910,21 @@ local function BuildOverviewPage(parent)
         rosterSearchLabel:Show()
         rosterSearchBox:Show()
 
-        if #GT.GetProfessionNames() == 0 then
-            noProfessionWarning:Show()
+        local hasAnyProfession = #GT.GetProfessionNames() > 0
+        noProfessionWarning:SetShown(not hasAnyProfession)
+
+        local visibleOpenButtons = RefreshOpenProfessionButtons()
+
+        -- Buttons checked first: they're anchored below noProfessionWarning
+        -- regardless of whether the banner itself is shown, so whenever any
+        -- are visible they're always the lower of the two — anchoring below
+        -- the banner instead (when both apply) left the buttons sitting in
+        -- the same space the roster list started rendering into.
+        if visibleOpenButtons > 0 then
+            AnchorScrollBelow(openProfessionButtons[visibleOpenButtons], 8)
+        elseif not hasAnyProfession then
             AnchorScrollBelow(noProfessionWarning, 8)
         else
-            noProfessionWarning:Hide()
             AnchorScrollBelow(filterBar, 8)
         end
 
@@ -871,6 +932,7 @@ local function BuildOverviewPage(parent)
     end
 
     ShowCharacter = function(char)
+        page.atRosterLevel = false
         breadcrumb:SetText((char.name or "?") .. "'s professions")
         backBtn:Show()
         rosterSearchLabel:Hide()
@@ -879,6 +941,7 @@ local function BuildOverviewPage(parent)
         filterBar:Hide()
         toolbar:Hide()
         noProfessionWarning:Hide()
+        for _, btn in ipairs(openProfessionButtons) do btn:Hide() end
         AnchorScrollBelow(breadcrumb, 8)
 
         -- Whether we have (or ever had) an actual export for this character,
@@ -952,6 +1015,7 @@ local function BuildOverviewPage(parent)
         backBtn:SetScript("OnClick", function() ShowCharacter(char) end)
         filterBar:Hide()
         noProfessionWarning:Hide()
+        for _, btn in ipairs(openProfessionButtons) do btn:Hide() end
 
         page.currentChar = char
         page.currentProfName = profName
@@ -999,7 +1063,7 @@ local function BuildSettingsPage(parent, onDeveloperModeChanged)
     -- width/height have to come from SetSize, not TOPLEFT/TOPRIGHT
     -- anchors, or the child (and everything on it) ends up zero-width.
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
-    scrollChild:SetSize(page:GetWidth() - 20, 760)
+    scrollChild:SetSize(page:GetWidth() - 20, 1000)
     scrollFrame:SetScrollChild(scrollChild)
 
     local title = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
@@ -1185,6 +1249,54 @@ local function BuildSettingsPage(parent, onDeveloperModeChanged)
         if onDeveloperModeChanged then onDeveloperModeChanged() end
     end)
 
+    -- Collapsible known-peers list — a plain-language answer to "who am I
+    -- actually syncing with", visible to every user (not gated behind
+    -- Developer mode like the Peer data page's full JSON dump). Placed
+    -- last on the page so its variable height (collapsed vs. expanded,
+    -- and however many peers) never needs anything below it re-anchored.
+    local peersHeader = CreateFrame("Button", nil, scrollChild)
+    peersHeader:SetHeight(18)
+    peersHeader:SetPoint("TOPLEFT", developerHint, "BOTTOMLEFT", -2, -16)
+    peersHeader:SetPoint("RIGHT", scrollChild, "RIGHT", -12, 0)
+
+    local peersHeaderText = peersHeader:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    peersHeaderText:SetPoint("LEFT", 0, 0)
+    peersHeader.text = peersHeaderText
+
+    local peersList = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    peersList:SetPoint("TOPLEFT", peersHeader, "BOTTOMLEFT", 4, -4)
+    peersList:SetPoint("RIGHT", scrollChild, "RIGHT", -12, 0)
+    peersList:SetJustifyH("LEFT")
+    peersList:SetSpacing(2)
+
+    local peersExpanded = false
+
+    local function RefreshPeersBox()
+        local peers = GT.GetKnownPeerNames()
+        peersHeaderText:SetText((peersExpanded and "\226\150\188 " or "\226\150\182 ") .. ("Known peers (%d)"):format(#peers))
+
+        if not peersExpanded then
+            peersList:Hide()
+            return
+        end
+
+        if #peers == 0 then
+            peersList:SetText("(none yet)")
+        else
+            local lines = {}
+            for _, peer in ipairs(peers) do
+                table.insert(lines, ("%s (%s) — %d known"):format(peer.name, peer.class or "?", peer.recipeCount))
+            end
+            peersList:SetText(table.concat(lines, "\n"))
+        end
+        peersList:Show()
+    end
+
+    peersHeader:SetScript("OnClick", function()
+        peersExpanded = not peersExpanded
+        RefreshPeersBox()
+    end)
+
     page.Refresh = function()
         minimapCheck:SetChecked(not GuildThingDB.minimap.hide)
         announceIntervalBox.Refresh()
@@ -1193,6 +1305,7 @@ local function BuildSettingsPage(parent, onDeveloperModeChanged)
         pruneStatus:SetText("")
         forceBroadcastStatus:SetText("")
         developerCheck:SetChecked(GT.IsDeveloperModeEnabled())
+        RefreshPeersBox()
     end
 
     return page
@@ -1335,6 +1448,18 @@ local function BuildPeerVisualizerPage(parent)
 
     local box, editBox = CreateTextBox(page, TEXTBOX_WIDTH, 320, true)
     box:SetPoint("TOPLEFT", refreshBtn, "BOTTOMLEFT", 0, -8)
+
+    -- WoW addons have no OS clipboard API — this just selects the box's
+    -- full text and focuses it (same trick the Import/Export page's own
+    -- Export button uses), so Ctrl+C actually has something to grab.
+    local copyBtn = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
+    copyBtn:SetSize(120, 22)
+    copyBtn:SetPoint("LEFT", refreshBtn, "RIGHT", 8, 0)
+    copyBtn:SetText("Highlight text")
+    copyBtn:SetScript("OnClick", function()
+        editBox:SetFocus()
+        editBox:HighlightText()
+    end)
 
     local function RefreshDump()
         local snapshot = GT.BuildP2PDataSnapshot()
@@ -1587,6 +1712,16 @@ local function CreateGTFrame()
         end
     end
 
+    -- Only re-runs ShowRoster if Overview is actually the visible page AND
+    -- at the roster level — see GT.SaveProfession hook below. Re-running it
+    -- otherwise would yank the user back to the roster mid-browse, or
+    -- rebuild a page they're not even looking at.
+    f.RefreshOverviewPage = function()
+        if overviewPage:IsShown() and overviewPage.atRosterLevel then
+            overviewPage.ShowRoster()
+        end
+    end
+
     f:SetScript("OnShow", function()
         UpdateDeveloperVisibility()
         SelectSidebar(overviewBtn)
@@ -1621,6 +1756,29 @@ local function ToggleGTFrame()
 end
 
 GT.ToggleUI = ToggleGTFrame
+
+-- Overview reflects a fresh scan immediately (e.g. after clicking one of
+-- the "Open <profession>" buttons) instead of needing a manual re-click or
+-- a full /reload — the scan itself is already saved synchronously by the
+-- time this fires, this just re-renders what's on screen. No-ops if the
+-- window's never been opened this session (frame nil) or Overview isn't
+-- what's currently showing (see f.RefreshOverviewPage, CreateGTFrame).
+hooksecurefunc(GT, "SaveProfession", function()
+    if frame then
+        frame.RefreshOverviewPage()
+    end
+end)
+
+-- Same reasoning as the SaveProfession hook above — the Debug page's
+-- "Reset my professions" button clears entry.professions without going
+-- through SaveProfession, so it needs its own hook or Overview (and the
+-- "Open <profession>" buttons) silently keep showing stale state until
+-- the user happens to navigate away and back.
+hooksecurefunc(GT, "DebugResetOwnProfessions", function()
+    if frame then
+        frame.RefreshOverviewPage()
+    end
+end)
 
 SLASH_GUILDTHING1 = "/or"
 SLASH_GUILDTHING2 = "/ourrecipes"

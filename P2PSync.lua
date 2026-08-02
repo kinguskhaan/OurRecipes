@@ -233,6 +233,28 @@ local function CountKnownPeers()
 	return count
 end
 
+-- Plain name/class/recipe-count list for the Settings page's "known
+-- peers" collapse box (UI.lua) — a friendlier, non-Developer-mode view
+-- than the full Peer data JSON dump, for anyone just wanting to confirm
+-- "who am I actually syncing with" without opening Developer mode.
+function GT.GetKnownPeerNames()
+	local peers = {}
+	for _, entry in pairs(GuildThingDB.P2PData or {}) do
+		-- type(entry.name) == "string": defends against a stray pre-fix
+		-- corrupted entry (see HandleCompletePayload's payload.s guard)
+		-- still sitting in SavedVariables from before that validation existed.
+		if type(entry.name) == "string" then
+			local recipeCount = 0
+			for _ in pairs(entry.recipeNames or {}) do
+				recipeCount = recipeCount + 1
+			end
+			table.insert(peers, { name = entry.name, class = entry.class, recipeCount = recipeCount })
+		end
+	end
+	table.sort(peers, function(a, b) return a.name:lower() < b.name:lower() end)
+	return peers
+end
+
 local function GetResendIntervalSeconds()
 	local settings = GetP2PSettings()
 	local knownPeers = CountKnownPeers()
@@ -769,15 +791,22 @@ local function HandleCompletePayload(senderName, blob, channel)
 		return
 	end
 
+	-- payload.s is untrusted network data — a peer on a corrupt/mismatched
+	-- version (or anything else that produced a non-string here) must not
+	-- get to name a P2PData entry with it. table.sort in GT.GetRoster
+	-- (Core.lua) assumes every name is a string and calls :lower() on it;
+	-- a stray number here previously crashed the whole Overview roster.
+	local rawSubject = type(payload.s) == "string" and payload.s or nil
+
 	PushLog(completedPayloadLog, {
 		at = time(),
 		from = senderName,
 		channel = channel,
-		subject = payload.s or senderName,
-		isHello = channel == "WHISPER" and not payload.s,
+		subject = rawSubject or senderName,
+		isHello = channel == "WHISPER" and not rawSubject,
 	})
 
-	local subjectName = payload.s or senderName
+	local subjectName = rawSubject or senderName
 	GuildThingDB.P2PData = GuildThingDB.P2PData or {}
 	local key = GT.ClubScanKey(subjectName, GetRealmName())
 
@@ -884,6 +913,17 @@ end
 function GT.PruneDepartedPeers()
 	local data = GuildThingDB.P2PData
 	if not data then
+		return 0
+	end
+
+	-- GUILD_ROSTER_UPDATE (this function's automatic trigger, Core.lua)
+	-- fires early after login/reload, sometimes before the server has
+	-- actually sent the full roster — GetNumGuildMembers() reads 0 in that
+	-- window. Every real peer would fail IsGuildMember and get wiped for
+	-- no reason. A real guild always has at least the player as a member,
+	-- so 0 here means "not loaded yet", not "empty guild" — skip pruning
+	-- rather than trusting an incomplete roster.
+	if GetNumGuildMembers() == 0 then
 		return 0
 	end
 
