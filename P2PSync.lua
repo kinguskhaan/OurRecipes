@@ -71,13 +71,88 @@ local ADDON_PREFIX = "GT_RECIPES"
 local CHUNK_BODY_LIMIT = 230 -- addon messages cap at 255 chars; header eats ~16-25
 local SEQ_WRAP = 100
 
+-- Diagnostic counters for the oversized-message guard below, surfaced on
+-- the Peer data page (UI.lua) via GT.GetOversizedDropInfo — distinct from
+-- ChatThrottleLib's own pacing (GT.GetChatThrottleInfo further down):
+-- this is a message refused outright, not one merely delayed.
+local oversizedDropCount = 0
+local lastOversizedDropAt = nil
+
+-- Every successful send THIS addon made this session — separate from
+-- ChatThrottleLib's own nTotalSent (see GetChatThrottleInfo below), which
+-- is shared across every addon embedding the same library instance and
+-- therefore useless for telling whether OurRecipes specifically is
+-- sending too much.
+local ownMessagesSent = 0
+
+function GT.GetOversizedDropInfo()
+	return { count = oversizedDropCount, lastAt = lastOversizedDropAt }
+end
+
+-- Diagnostic-only, session-local logs surfaced on the Peer data page
+-- (UI.lua) for troubleshooting "is this actually working" — e.g. 0 known
+-- peers despite other people having the addon installed. raw records
+-- every addon message heard from someone else regardless of type or
+-- whether it ever fully assembled, so "did anything even arrive" is
+-- answerable without guessing; completed records only payloads that
+-- fully decoded, tagged so a reactive hello (isHello: a WHISPER of
+-- someone's own data, unprompted — see SendHelloTo, the only sender that
+-- omits payload.s) is distinguishable from a broadcast or an ASK reply
+-- relaying a third party; outgoing mirrors the same shape for our own sends.
+local MAX_LOG_ENTRIES = 15
+local rawMessageLog = {}
+local completedPayloadLog = {}
+local outgoingMessageLog = {}
+
+-- No-ops unless Developer mode is on — these logs are session-local Lua
+-- tables to begin with (never touch GuildThingDB/SavedVariables, on or
+-- off), but skip even building them up in memory for everyone who never
+-- opens that page.
+local function PushLog(log, entry)
+	if not GT.IsDeveloperModeEnabled() then
+		return
+	end
+	table.insert(log, entry)
+	while #log > MAX_LOG_ENTRIES do
+		table.remove(log, 1)
+	end
+end
+
+-- "kind" for a message we RECEIVED — sniffed from its own shape, since
+-- OnAddonMessage doesn't know yet what it is when it logs. Outgoing sends
+-- pass their kind explicitly instead (see SafeSendAddonMessage below) —
+-- every call site already knows exactly what it's sending, no sniffing needed.
+local function ClassifyMessage(message)
+	if message:sub(1, 4) == "SYN:" then
+		return "SYN"
+	elseif message == "ACKM" then
+		return "ACKM"
+	elseif message:sub(1, 5) == "ACKD:" then
+		return "ACKD"
+	elseif message:sub(1, 5) == "ASKQ:" then
+		return "ASKQ"
+	elseif message:match("^%d+:%d+:%d+:") then
+		return "chunk"
+	end
+	return "unknown"
+end
+
+function GT.GetP2PTrafficLog()
+	return { raw = rawMessageLog, completed = completedPayloadLog, outgoing = outgoingMessageLog }
+end
+
 -- Every send funnels through here. Nothing should ever actually hit the
 -- 255-char cap (control messages are fixed-format, data payloads are
 -- pre-chunked to CHUNK_BODY_LIMIT above) — this is just the one place
 -- that would notice and drop it if that assumption ever broke, instead
 -- of the message silently vanishing into the client with no trace.
-local function SafeSendAddonMessage(prio, message, chatType, target)
+-- kind: purely diagnostic label for the outgoing log above (see
+-- ClassifyMessage — this is the explicit equivalent for sends, where the
+-- caller already knows what it's sending).
+local function SafeSendAddonMessage(prio, message, chatType, target, kind)
 	if #message > 255 then
+		oversizedDropCount = oversizedDropCount + 1
+		lastOversizedDropAt = time()
 		print(
 			("|cffff0000[GuildThing]|r dropped oversized addon message (%d bytes > 255): %s..."):format(
 				#message,
@@ -86,7 +161,32 @@ local function SafeSendAddonMessage(prio, message, chatType, target)
 		)
 		return
 	end
+	ownMessagesSent = ownMessagesSent + 1
+	PushLog(outgoingMessageLog, { at = time(), to = target, channel = chatType, kind = kind })
 	ChatThrottleLib:SendAddonMessage(prio, ADDON_PREFIX, message, chatType, target)
+end
+
+-- ChatThrottleLib's own pacing state for the "BULK" priority (the only one
+-- this addon uses) — reaches into its internals since it exposes no public
+-- introspection API, but the vendored copy's shape is stable. queued: a
+-- message is sitting in CTL's send queue, not yet actually gone out yet.
+-- availBandwidth going negative means CTL itself is currently over budget
+-- and holding sends back, regardless of anything this addon's own
+-- throttle logic decided. sharedLibraryTotalSent is CTL-wide (see
+-- ChatThrottleLib.lua's top-of-file version check — every addon embedding
+-- it reuses the SAME global instance), NOT specific to OurRecipes; use
+-- ownMessagesSent for that.
+function GT.GetChatThrottleInfo()
+	local prio = ChatThrottleLib.Prio and ChatThrottleLib.Prio.BULK
+	if not prio then
+		return nil
+	end
+	return {
+		queued = prio.Ring.pos ~= nil,
+		sharedLibraryTotalSent = prio.nTotalSent,
+		ownMessagesSent = ownMessagesSent,
+		availBandwidth = prio.avail,
+	}
 end
 
 -----------------------------
@@ -240,7 +340,7 @@ local function SendChunks(chunks, chatType, target)
 	local total = #chunks
 	for i, chunk in ipairs(chunks) do
 		local header = string.format("%d:%d:%d:", seq, i, total)
-		SafeSendAddonMessage("BULK", header .. chunk, chatType, target)
+		SafeSendAddonMessage("BULK", header .. chunk, chatType, target, "chunk")
 	end
 end
 
@@ -248,7 +348,25 @@ end
 -- fields (entry.professions, entry.lastImport) — signature is just the
 -- sorted, comma-joined spellID list, cheap to compare as a plain string.
 -- force (GT.DebugForceBroadcast) skips the throttle entirely.
-local function TryBroadcastSelfRecipes(force)
+-- Session-only, not persisted — surfaced via GT.GetSelfBroadcastInfo for
+-- the Peer data page (UI.lua). lastThrottledAt/Reason: the last time a
+-- send was attempted but skipped. lastSentReason: what actually triggered
+-- the most recent successful send ("login", "profession-scan", "force").
+local lastThrottledAt = nil
+local lastThrottledReason = nil
+local lastSentReason = nil
+
+-- allowUnchangedResend: whether an UNCHANGED signature is even allowed to
+-- justify a resend on its own (subject to the normal timing throttle
+-- below) — true for the login/periodic-reannounce path (the whole point
+-- there is reaching peers who haven't heard from you in a while, even
+-- with nothing new to report), false for the SaveProfession-triggered
+-- path (opening/scrolling a profession window you've already fully
+-- scanned re-fires TRADE_SKILL_UPDATE repeatedly with identical data —
+-- that alone should never justify a broadcast, regardless of throttle
+-- state; only actually learning something new should).
+-- reason: human-readable trigger label, purely diagnostic (see above).
+local function TryBroadcastSelfRecipes(force, allowUnchangedResend, reason)
 	if not IsInGuild() then
 		return
 	end
@@ -262,9 +380,16 @@ local function TryBroadcastSelfRecipes(force)
 	local entry = GuildThingDB[key]
 
 	local unchanged = entry.p2pLastSentSignature == signature
-	local recentlySent = entry.p2pLastSentAt and (time() - entry.p2pLastSentAt) < GetResendIntervalSeconds()
-	if not force and unchanged and recentlySent then
-		return
+	if not force and unchanged then
+		if not allowUnchangedResend then
+			return
+		end
+		local recentlySent = entry.p2pLastSentAt and (time() - entry.p2pLastSentAt) < GetResendIntervalSeconds()
+		if recentlySent then
+			lastThrottledAt = time()
+			lastThrottledReason = reason
+			return
+		end
 	end
 
 	local chunks = ChunksFromIDs(ids, select(2, UnitClass("player")))
@@ -275,6 +400,7 @@ local function TryBroadcastSelfRecipes(force)
 
 	entry.p2pLastSentSignature = signature
 	entry.p2pLastSentAt = time()
+	lastSentReason = reason
 end
 
 -- Broadcast scheduling info for the Peer data page (UI.lua) — note this
@@ -287,8 +413,11 @@ function GT.GetSelfBroadcastInfo()
 	local intervalSeconds = GetResendIntervalSeconds()
 	return {
 		lastSentAt = lastSentAt,
+		lastSentReason = lastSentReason,
 		resendIntervalSeconds = intervalSeconds,
 		earliestNextBroadcastAt = lastSentAt and (lastSentAt + intervalSeconds) or nil,
+		lastThrottledAt = lastThrottledAt,
+		lastThrottledReason = lastThrottledReason,
 	}
 end
 
@@ -323,11 +452,17 @@ local function DrainHelloQueue()
 	if not senderName then
 		return
 	end
-	helloQueued[senderName] = nil
 	SendHelloTo(senderName)
 	C_Timer.After(HELLO_STAGGER_SECONDS, DrainHelloQueue)
 end
 
+-- helloQueued entries are never cleared once set (session-only, resets on
+-- reload/login) — a sender's own broadcast is usually several chunks, and
+-- their P2PData entry only appears once ALL of them arrive. Clearing this
+-- as soon as a hello drained (previously: in DrainHelloQueue) left a
+-- window where a still-arriving chunk from the SAME broadcast would see
+-- "not yet in P2PData" again and queue a second, redundant hello before
+-- the first broadcast had even finished assembling.
 local function QueueHello(senderName)
 	if helloQueued[senderName] then
 		return
@@ -487,7 +622,7 @@ local function TryGossipHandshake()
 	local state = GetGossipState()
 	state[GT.ClubScanKey(partner, GetRealmName())] = time()
 
-	SafeSendAddonMessage("BULK", "SYN:" .. BuildCombinedHash(), "WHISPER", partner)
+	SafeSendAddonMessage("BULK", "SYN:" .. BuildCombinedHash(), "WHISPER", partner, "SYN")
 end
 
 -- Timestamp of the most recent gossip round, whether or not a partner
@@ -531,9 +666,9 @@ end
 -- from theirs (see OnAckDigest for the other half of that exchange).
 local function OnSyn(senderName, theirHash)
 	if tostring(BuildCombinedHash()) == theirHash then
-		SafeSendAddonMessage("BULK", "ACKM", "WHISPER", senderName)
+		SafeSendAddonMessage("BULK", "ACKM", "WHISPER", senderName, "ACKM")
 	else
-		SafeSendAddonMessage("BULK", "ACKD:" .. BuildDigestRows(DIGEST_ROW_LIMIT), "WHISPER", senderName)
+		SafeSendAddonMessage("BULK", "ACKD:" .. BuildDigestRows(DIGEST_ROW_LIMIT), "WHISPER", senderName, "ACKD")
 	end
 end
 
@@ -546,7 +681,7 @@ local function OnAckDigest(senderName, rowsStr)
 		local ownEntry = GuildThingDB.P2PData and GuildThingDB.P2PData[key]
 		local ownHash = ownEntry and tostring(EntrySignatureHash(ownEntry))
 		if ownHash ~= row.hash then
-			SafeSendAddonMessage("BULK", "ASKQ:" .. row.name, "WHISPER", senderName)
+			SafeSendAddonMessage("BULK", "ASKQ:" .. row.name, "WHISPER", senderName, "ASKQ")
 		end
 	end
 end
@@ -603,31 +738,6 @@ end
 -- chunk with a new seq resets that sender's buffer, superseding whatever
 -- broadcast was previously in-flight from them.
 local pendingChunks = {}
-
--- Diagnostic-only, session-local logs surfaced on the Peer data page
--- (UI.lua) for troubleshooting "is this actually working" — e.g. 0
--- known peers despite other people having the addon installed. rawLog
--- records every addon message heard from someone else regardless of
--- type or whether it ever fully assembled, so "did anything even
--- arrive" is answerable without guessing; completedLog records only
--- payloads that fully decoded, tagged so a reactive hello (isHello:
--- a WHISPER of someone's own data, unprompted — see SendHelloTo, the
--- only sender that omits payload.s) is distinguishable from a broadcast
--- or an ASK reply relaying a third party.
-local MAX_LOG_ENTRIES = 15
-local rawMessageLog = {}
-local completedPayloadLog = {}
-
-local function PushLog(log, entry)
-	table.insert(log, entry)
-	while #log > MAX_LOG_ENTRIES do
-		table.remove(log, 1)
-	end
-end
-
-function GT.GetP2PTrafficLog()
-	return { raw = rawMessageLog, completed = completedPayloadLog }
-end
 
 -- Reverse of TryBroadcastSelfRecipes' send pipeline: Base64 -> zlib ->
 -- JSON -> spellID list -> recipe names. Stored under the SENDER's
@@ -709,7 +819,7 @@ local function OnAddonMessage(prefix, message, channel, sender)
 		return
 	end -- ignore our own broadcast, if it ever echoes
 
-	PushLog(rawMessageLog, { at = time(), from = senderName, channel = channel })
+	PushLog(rawMessageLog, { at = time(), from = senderName, channel = channel, kind = ClassifyMessage(message) })
 
 	-- Only a GUILD broadcast can trigger a hello — never a WHISPER, or
 	-- two strangers who don't know each other could whisper back and
@@ -813,7 +923,7 @@ p2pFrame:SetScript("OnEvent", function(_, event, ...)
 	if event == "CHAT_MSG_ADDON" then
 		OnAddonMessage(...)
 	else
-		TryBroadcastSelfRecipes()
+		TryBroadcastSelfRecipes(false, true, "login")
 		ScheduleGossipHandshake()
 	end
 end)
@@ -825,7 +935,7 @@ end)
 -- (skillName, recipes) arguments never get passed through as our force
 -- parameter — hooksecurefunc forwards the hooked call's original args.
 hooksecurefunc(GT, "SaveProfession", function()
-	TryBroadcastSelfRecipes()
+	TryBroadcastSelfRecipes(false, false, "profession-scan")
 end)
 
 -----------------------------
@@ -835,11 +945,11 @@ end)
 -- internals without a second account/client online — everything above
 -- is guild-chat/whisper based and otherwise hard to test solo.
 function GT.DebugForceBroadcast()
-	TryBroadcastSelfRecipes(true)
+	TryBroadcastSelfRecipes(true, nil, "force")
 end
 
 function GT.DebugForceGossip(targetName)
-	SafeSendAddonMessage("BULK", "SYN:" .. BuildCombinedHash(), "WHISPER", targetName)
+	SafeSendAddonMessage("BULK", "SYN:" .. BuildCombinedHash(), "WHISPER", targetName, "SYN")
 end
 
 -- Exposes the otherwise-local BuildCombinedHash so a debug SYN can be

@@ -107,6 +107,7 @@ function GT.BuildP2PDataSnapshot()
 	local selfBroadcast = GT.GetSelfBroadcastInfo()
 	selfBroadcast.lastSentAt = FormatTimestamp(selfBroadcast.lastSentAt)
 	selfBroadcast.earliestNextBroadcastAt = FormatTimestamp(selfBroadcast.earliestNextBroadcastAt)
+	selfBroadcast.lastThrottledAt = FormatTimestamp(selfBroadcast.lastThrottledAt)
 
 	-- Gossip: this one IS a real recurring timer (hourly), so nextRoundAt
 	-- is an actual prediction, not just a threshold.
@@ -114,13 +115,18 @@ function GT.BuildP2PDataSnapshot()
 	gossip.lastRoundAt = FormatTimestamp(gossip.lastRoundAt)
 	gossip.nextRoundAt = FormatTimestamp(gossip.nextRoundAt)
 
-	-- Raw + completed message logs, newest last. isHello on a completed
-	-- entry means it arrived as a WHISPER of someone's own (non-relayed)
-	-- data — see HandleCompletePayload in P2PSync.lua.
+	-- Raw + completed + outgoing message logs, newest last. isHello on a
+	-- completed entry means it arrived as a WHISPER of someone's own
+	-- (non-relayed) data — see HandleCompletePayload in P2PSync.lua. All
+	-- three are empty unless Developer mode is (or was) on this session —
+	-- see PushLog in P2PSync.lua.
 	local trafficLog = GT.GetP2PTrafficLog()
 	local raw = {}
 	for _, entry in ipairs(trafficLog.raw) do
-		table.insert(raw, { at = FormatTimestamp(entry.at), from = entry.from, channel = entry.channel })
+		table.insert(
+			raw,
+			{ at = FormatTimestamp(entry.at), from = entry.from, channel = entry.channel, kind = entry.kind }
+		)
 	end
 	local completed = {}
 	for _, entry in ipairs(trafficLog.completed) do
@@ -132,6 +138,23 @@ function GT.BuildP2PDataSnapshot()
 			isHello = entry.isHello,
 		})
 	end
+	local outgoing = {}
+	for _, entry in ipairs(trafficLog.outgoing) do
+		table.insert(
+			outgoing,
+			{ at = FormatTimestamp(entry.at), to = entry.to, channel = entry.channel, kind = entry.kind }
+		)
+	end
+
+	-- oversizedDrops: our own 255-char guard, refused outright, never even
+	-- attempted. chatThrottleLib: CTL's own pacing — queued/negative
+	-- availBandwidth means CTL itself is holding sends back, separate from
+	-- our own broadcast throttle (selfBroadcast.lastThrottledAt) above.
+	local oversized = GT.GetOversizedDropInfo()
+	local throttle = {
+		oversizedDrops = { count = oversized.count, lastAt = FormatTimestamp(oversized.lastAt) },
+		chatThrottleLib = GT.GetChatThrottleInfo(),
+	}
 
 	return {
 		peerCount = #peers,
@@ -140,7 +163,8 @@ function GT.BuildP2PDataSnapshot()
 		selfBroadcast = selfBroadcast,
 		gossip = gossip,
 		helloQueue = GT.GetHelloQueueSnapshot(),
-		traffic = { raw = raw, completed = completed },
+		traffic = { raw = raw, completed = completed, outgoing = outgoing },
+		throttle = throttle,
 	}
 end
 

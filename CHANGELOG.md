@@ -2,6 +2,19 @@
 
 All notable changes to this addon are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [0.1.0-beta.4] - 2026-08-02
+
+### Fixed
+
+- Broadcast throttle was structurally bypassed below the 5-peer bootstrap threshold: `GetResendIntervalSeconds()` returning 0 made the "recently sent" check impossible to satisfy, so every `SaveProfession` call (i.e. every `TRADE_SKILL_UPDATE`, which fires repeatedly just from having a profession window open) sent a full, unthrottled broadcast — not just on login as intended. Broadcasts triggered by a profession scan now only go out when the known-recipe signature actually changed; login keeps the "always eligible below threshold" behavior, since re-announcing to reach peers who haven't heard from you yet is the point there.
+- Reactive hello could be sent twice for the same broadcast: the dedupe flag was cleared as soon as a hello drained from the queue, which — when the queue was empty — happens synchronously on the very first chunk of a sender's multi-chunk broadcast, before the rest of that broadcast has even finished assembling into a real peer entry. The flag is now session-permanent instead (reset only on reload/login).
+- "Simulate multi-chunk" debug button now sends the full Engineering catalog instead of a fixed count (previously 40) — the fixed count had compressed down to a single chunk, silently no longer testing multi-chunk reassembly at all.
+
+### Added
+
+- Peer data page: reactive-hello and own-broadcast throttle state now show *why* the last one fired (`login` / `profession-scan` / `force`), plus separate own-vs-shared ChatThrottleLib send counters — the shared one is a global counter across every addon embedding the same library instance (WeakAuras, DBM, etc. all reuse the same instance), not specific to this addon, so it was misleading on its own.
+- Peer data page: raw/completed traffic logs now tag each entry with a message `kind` (SYN/ACKM/ACKD/ASKQ/chunk), plus a new `outgoing` log mirroring the same shape for sends. All three only get built up in memory while Developer mode is on.
+
 ## [0.1.0-beta.3] - 2026-08-02
 
 ### Added

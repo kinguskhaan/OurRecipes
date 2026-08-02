@@ -1211,13 +1211,18 @@ end
 
 -- First `count` catalog recipes (that resolve to a real spellID) for
 -- profName, comma-joined — same trick as the /run snippet used to solo-test
--- multi-chunk reassembly without hand-typing dozens of recipe names.
+-- multi-chunk reassembly without hand-typing dozens of recipe names. count
+-- defaults to the WHOLE catalog rather than a fixed number: a fixed count
+-- (previously 40) can silently stop forcing multiple chunks if catalog
+-- compression ever improves, quietly turning a multi-chunk test into a
+-- single-chunk one with no warning — the full catalog can't fall short
+-- that way.
 local function BuildSampleRecipeList(profName, count)
     local names = {}
     for _, recipe in ipairs(GT.GetCatalogForProfession(profName)) do
         if recipe.kind == "spell" then
             table.insert(names, recipe.name)
-            if #names >= count then break end
+            if count and #names >= count then break end
         end
     end
     return table.concat(names, ",")
@@ -1266,8 +1271,8 @@ local function BuildDebugPage(parent)
         GT.HandleDebugCommand("fakerecipe testkingen Arcane Elixir")
     end)
 
-    AddButton("Simulate multi-chunk (40 recipes)", function()
-        local list = BuildSampleRecipeList("Engineering", 40)
+    AddButton("Simulate multi-chunk (full Engineering catalog)", function()
+        local list = BuildSampleRecipeList("Engineering")
         GT.HandleDebugCommand("fakerecipe multichunktest " .. list)
     end)
 
