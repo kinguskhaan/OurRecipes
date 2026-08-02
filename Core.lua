@@ -273,14 +273,29 @@ end
 local clubScanFrame = CreateFrame("Frame")
 clubScanFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
 clubScanFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
+
+-- GUILD_ROSTER_UPDATE can fire several times in a burst while the server
+-- sends the roster in batches after login/reload — GetNumGuildMembers()
+-- reading a nonzero-but-still-incomplete count mid-burst (not just a
+-- flat 0) was enough to wipe real peers in the wild, since anyone not in
+-- that partial roster yet fails IsGuildMember and gets pruned. Debounce
+-- instead of pruning on every fire: only prune once no further roster
+-- update has arrived for a few seconds, i.e. once it's actually settled.
+local pruneDebounceTimer
+
 clubScanFrame:SetScript("OnEvent", function()
     ScanGuildClubProfessions()
-    -- Same signal doubles as "guild membership may have changed" for the
-    -- P2P peer cache — piggyback here instead of a separate polling timer
-    -- (GT.PruneDepartedPeers is defined in P2PSync.lua, which loads after
-    -- this file, but by the time this event actually fires at runtime
-    -- every file has already loaded).
-    GT.PruneDepartedPeers()
+
+    if pruneDebounceTimer then
+        pruneDebounceTimer:Cancel()
+    end
+    -- GT.PruneDepartedPeers is defined in P2PSync.lua, which loads after
+    -- this file, but by the time this timer actually fires at runtime
+    -- every file has already loaded.
+    pruneDebounceTimer = C_Timer.NewTimer(3, function()
+        pruneDebounceTimer = nil
+        GT.PruneDepartedPeers()
+    end)
 end)
 
 -----------------------------

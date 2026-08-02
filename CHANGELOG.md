@@ -2,6 +2,12 @@
 
 All notable changes to this addon are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [0.1.0-beta.6] - 2026-08-03
+
+### Fixed
+
+- beta.5's `GetNumGuildMembers() == 0` guard against pruning peers before the guild roster had loaded wasn't enough — `GUILD_ROSTER_UPDATE` can fire several times in a burst while the server sends the roster in batches, and a nonzero-but-still-incomplete count mid-burst was enough to wipe real peers who just hadn't landed in the partial roster yet. Pruning is now debounced: it only runs once no further roster update has arrived for a few seconds, instead of on every single fire.
+
 ## [0.1.0-beta.5] - 2026-08-03
 
 ### Added
