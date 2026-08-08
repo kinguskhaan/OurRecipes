@@ -32,11 +32,13 @@ local function PrintUsage()
 	print("  /or debug fakerecipe <name> <recipe name> — simulate <name> broadcasting that one recipe")
 	print("  /or debug dump — print P2PData and gossip state")
 	print("  /or debug resetprofessions — clear this character's scanned professions")
+	print("  /or debug testprune — force a roster settle check + prune now, bypassing the daily limit")
+	print("  /or debug resetpeers — clear every known peer for this guild (fresh slate for testing)")
 end
 
 local function DumpP2PData()
 	print("|cffffff00[GuildThing debug]|r P2PData:")
-	local data = GuildThingDB.P2PData or {}
+	local data = GT.GetP2PData() or {}
 	local count = 0
 	for key, entry in pairs(data) do
 		count = count + 1
@@ -58,7 +60,7 @@ local function DumpP2PData()
 	end
 
 	print("|cffffff00[GuildThing debug]|r gossip state:")
-	local state = GuildThingDB.P2PGossipState or {}
+	local state = GT.GetP2PGossipState() or {}
 	local stateCount = 0
 	for key, lastSynced in pairs(state) do
 		stateCount = stateCount + 1
@@ -79,7 +81,7 @@ end
 
 function GT.BuildP2PDataSnapshot()
 	local peers = {}
-	for key, entry in pairs(GuildThingDB.P2PData or {}) do
+	for key, entry in pairs(GT.GetP2PData() or {}) do
 		local recipeNames = {}
 		for name in pairs(entry.recipeNames or {}) do
 			table.insert(recipeNames, name)
@@ -97,7 +99,7 @@ function GT.BuildP2PDataSnapshot()
 	table.sort(peers, function(a, b) return (a.name or a.key) < (b.name or b.key) end)
 
 	local gossipState = {}
-	for key, lastSynced in pairs(GuildThingDB.P2PGossipState or {}) do
+	for key, lastSynced in pairs(GT.GetP2PGossipState() or {}) do
 		gossipState[key] = FormatTimestamp(lastSynced)
 	end
 
@@ -121,12 +123,20 @@ function GT.BuildP2PDataSnapshot()
 	-- three are empty unless Developer mode is (or was) on this session —
 	-- see PushLog in P2PSync.lua.
 	local trafficLog = GT.GetP2PTrafficLog()
+	-- message/rawPayloadS: the actual content sent/received/decoded, not
+	-- just metadata about it — so a future case like the one where a
+	-- peer's payload.s turned up as a number instead of a name is
+	-- diagnosable directly from this dump, without needing an external
+	-- repro script to guess at what was actually on the wire.
 	local raw = {}
 	for _, entry in ipairs(trafficLog.raw) do
-		table.insert(
-			raw,
-			{ at = FormatTimestamp(entry.at), from = entry.from, channel = entry.channel, kind = entry.kind }
-		)
+		table.insert(raw, {
+			at = FormatTimestamp(entry.at),
+			from = entry.from,
+			channel = entry.channel,
+			kind = entry.kind,
+			message = entry.message,
+		})
 	end
 	local completed = {}
 	for _, entry in ipairs(trafficLog.completed) do
@@ -135,15 +145,19 @@ function GT.BuildP2PDataSnapshot()
 			from = entry.from,
 			channel = entry.channel,
 			subject = entry.subject,
+			rawPayloadS = entry.rawPayloadS,
 			isHello = entry.isHello,
 		})
 	end
 	local outgoing = {}
 	for _, entry in ipairs(trafficLog.outgoing) do
-		table.insert(
-			outgoing,
-			{ at = FormatTimestamp(entry.at), to = entry.to, channel = entry.channel, kind = entry.kind }
-		)
+		table.insert(outgoing, {
+			at = FormatTimestamp(entry.at),
+			to = entry.to,
+			channel = entry.channel,
+			kind = entry.kind,
+			message = entry.message,
+		})
 	end
 
 	-- oversizedDrops: our own 255-char guard, refused outright, never even
@@ -209,6 +223,14 @@ function GT.HandleDebugCommand(argsStr)
 	elseif command == "resetprofessions" then
 		GT.DebugResetOwnProfessions()
 		print("|cffffff00[GuildThing debug]|r cleared this character's scanned professions")
+	elseif command == "testprune" then
+		print("|cffffff00[GuildThing debug]|r starting roster settle check (force, bypasses the daily limit)...")
+		GT.RequestDebouncedPeerPrune(function(removed)
+			print(("|cffffff00[GuildThing debug]|r testprune done — %d peer(s) removed."):format(removed))
+		end, true, true)
+	elseif command == "resetpeers" then
+		local count = GT.DebugResetPeers()
+		print(("|cffffff00[GuildThing debug]|r cleared %d peer(s)"):format(count))
 	else
 		PrintUsage()
 	end

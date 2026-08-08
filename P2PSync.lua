@@ -71,6 +71,67 @@ local ADDON_PREFIX = "GT_RECIPES"
 local CHUNK_BODY_LIMIT = 230 -- addon messages cap at 255 chars; header eats ~16-25
 local SEQ_WRAP = 100
 
+-----------------------------
+-- GUILD-SCOPED P2P STORAGE --
+-----------------------------
+-- GuildThingDB is account-wide (plain SavedVariables, not PerCharacter —
+-- see the .toc), so without this, playing characters in different guilds
+-- would fight over one shared P2P cache: logging into an alt in Guild B
+-- makes GT.PruneDepartedPeers (roster-based, checks the CURRENTLY logged
+-- in character's guild) look like everyone from Guild A just "departed",
+-- silently deleting their data — and logging back to Guild A does the
+-- same to Guild B's data. Scoping P2PData/P2PGossipState by guild+realm
+-- keeps each guild's peer knowledge in its own bucket: alts in the SAME
+-- guild still share one bucket (no need to re-collect), but different
+-- guilds never step on each other.
+-- Exposed (not local) so Core.lua's "other characters in this guild"
+-- lookup (GT.GetOtherOwnCharactersInGuild) can tag which guild each of
+-- your alts belongs to using the exact same key, without duplicating
+-- this logic.
+function GT.GetGuildKey()
+	local guildName = GetGuildInfo("player")
+	if not guildName then
+		return nil
+	end
+	return string.lower(guildName .. "-" .. GetRealmName())
+end
+
+-- Returns this guild's P2PData bucket, or nil if not currently in a
+-- guild. One-time migrates a pre-existing flat GuildThingDB.P2PData
+-- (from before per-guild scoping existed) into the CURRENT guild's
+-- bucket — the common single-guild case keeps all its data with no
+-- action needed; anything that turns out to belong to a different guild
+-- gets naturally pruned away by the normal roster-based cleanup.
+function GT.GetP2PData()
+	local guildKey = GT.GetGuildKey()
+	if not guildKey then
+		return nil
+	end
+	GuildThingDB.P2PDataByGuild = GuildThingDB.P2PDataByGuild or {}
+	if GuildThingDB.P2PData and not GuildThingDB.P2PDataByGuild[guildKey] then
+		GuildThingDB.P2PDataByGuild[guildKey] = GuildThingDB.P2PData
+		GuildThingDB.P2PData = nil
+	end
+	GuildThingDB.P2PDataByGuild[guildKey] = GuildThingDB.P2PDataByGuild[guildKey] or {}
+	return GuildThingDB.P2PDataByGuild[guildKey]
+end
+
+-- Same migration/scoping as GT.GetP2PData, for the gossip-partner
+-- cooldown table.
+function GT.GetP2PGossipState()
+	local guildKey = GT.GetGuildKey()
+	if not guildKey then
+		return nil
+	end
+	GuildThingDB.P2PGossipStateByGuild = GuildThingDB.P2PGossipStateByGuild or {}
+	if GuildThingDB.P2PGossipState and not GuildThingDB.P2PGossipStateByGuild[guildKey] then
+		GuildThingDB.P2PGossipStateByGuild[guildKey] = GuildThingDB.P2PGossipState
+		GuildThingDB.P2PGossipState = nil
+	end
+	GuildThingDB.P2PGossipStateByGuild[guildKey] = GuildThingDB.P2PGossipStateByGuild[guildKey] or {}
+	return GuildThingDB.P2PGossipStateByGuild[guildKey]
+end
+
 -- Diagnostic counters for the oversized-message guard below, surfaced on
 -- the Peer data page (UI.lua) via GT.GetOversizedDropInfo — distinct from
 -- ChatThrottleLib's own pacing (GT.GetChatThrottleInfo further down):
@@ -162,7 +223,7 @@ local function SafeSendAddonMessage(prio, message, chatType, target, kind)
 		return
 	end
 	ownMessagesSent = ownMessagesSent + 1
-	PushLog(outgoingMessageLog, { at = time(), to = target, channel = chatType, kind = kind })
+	PushLog(outgoingMessageLog, { at = time(), to = target, channel = chatType, kind = kind, message = message })
 	ChatThrottleLib:SendAddonMessage(prio, ADDON_PREFIX, message, chatType, target)
 end
 
@@ -227,7 +288,7 @@ end
 
 local function CountKnownPeers()
 	local count = 0
-	for _ in pairs(GuildThingDB.P2PData or {}) do
+	for _ in pairs(GT.GetP2PData() or {}) do
 		count = count + 1
 	end
 	return count
@@ -237,9 +298,12 @@ end
 -- peers" collapse box (UI.lua) — a friendlier, non-Developer-mode view
 -- than the full Peer data JSON dump, for anyone just wanting to confirm
 -- "who am I actually syncing with" without opening Developer mode.
+-- key on each entry is the actual GT.GetP2PData() map key — needed by
+-- callers (the Settings page's per-peer "Remove" button, GT.RemovePeer
+-- below) that need to remove one specific entry.
 function GT.GetKnownPeerNames()
 	local peers = {}
-	for _, entry in pairs(GuildThingDB.P2PData or {}) do
+	for key, entry in pairs(GT.GetP2PData() or {}) do
 		-- type(entry.name) == "string": defends against a stray pre-fix
 		-- corrupted entry (see HandleCompletePayload's payload.s guard)
 		-- still sitting in SavedVariables from before that validation existed.
@@ -248,11 +312,27 @@ function GT.GetKnownPeerNames()
 			for _ in pairs(entry.recipeNames or {}) do
 				recipeCount = recipeCount + 1
 			end
-			table.insert(peers, { name = entry.name, class = entry.class, recipeCount = recipeCount })
+			table.insert(peers, { key = key, name = entry.name, class = entry.class, recipeCount = recipeCount })
 		end
 	end
 	table.sort(peers, function(a, b) return a.name:lower() < b.name:lower() end)
 	return peers
+end
+
+-- Removes one specific peer by their GT.GetP2PData() key (see
+-- GT.GetKnownPeerNames) — the Settings page's per-peer "Remove" button.
+-- Unlike GT.PruneDepartedPeers this doesn't check guild membership at
+-- all: it's a deliberate manual removal, not automatic cleanup, so it
+-- works regardless of why the user wants that entry gone.
+function GT.RemovePeer(key)
+	local data = GT.GetP2PData()
+	local entry = data and data[key]
+	if not entry then
+		return false
+	end
+	data[key] = nil
+	GT.InvalidateProfessionSummaryCacheFor(entry.name, entry.realm)
+	return true
 end
 
 local function GetResendIntervalSeconds()
@@ -521,18 +601,42 @@ local function EntrySignatureHash(entry)
 	return LibDeflate:Adler32(table.concat(names, ","))
 end
 
--- One hash standing in for our entire P2PData — cheap enough to whisper
--- every round, and matching means there's nothing more to do this round.
+-- Everything the gossip mesh treats as "stuff I can tell someone about":
+-- real received peers (GT.GetP2PData) PLUS this account's own alts in the
+-- same guild, viewed as P2PData-shaped entries sourced from their own
+-- real scan (GT.BuildOwnAltP2PEntry, Core.lua). An alt that rarely logs
+-- in still gets its recipes spread through the guild this way — lazily,
+-- only when a gossip partner's digest actually reveals they're missing
+-- it, then answered on demand by OnAskRequest below — rather than a
+-- blanket broadcast on every login regardless of whether anyone needs it.
+function GT.GetGossipableEntries()
+	local combined = {}
+	for key, entry in pairs(GT.GetP2PData() or {}) do
+		combined[key] = entry
+	end
+	for _, alt in ipairs(GT.GetOtherOwnCharactersInGuild()) do
+		local altEntry = GT.BuildOwnAltP2PEntry(alt.key)
+		if altEntry then
+			combined[GT.ClubScanKey(altEntry.name, altEntry.realm)] = altEntry
+		end
+	end
+	return combined
+end
+
+-- One hash standing in for everything gossipable — cheap enough to
+-- whisper every round, and matching means there's nothing more to do
+-- this round.
 local function BuildCombinedHash()
+	local entries = GT.GetGossipableEntries()
 	local keys = {}
-	for key in pairs(GuildThingDB.P2PData or {}) do
+	for key in pairs(entries) do
 		table.insert(keys, key)
 	end
 	table.sort(keys)
 
 	local parts = {}
 	for _, key in ipairs(keys) do
-		table.insert(parts, key .. ":" .. EntrySignatureHash(GuildThingDB.P2PData[key]))
+		table.insert(parts, key .. ":" .. EntrySignatureHash(entries[key]))
 	end
 	return LibDeflate:Adler32(table.concat(parts, ";"))
 end
@@ -541,17 +645,18 @@ end
 -- mismatch eventually surfaces every cached person over enough rounds
 -- instead of only ever re-checking the same few.
 local function BuildDigestRows(limit)
+	local entries = GT.GetGossipableEntries()
 	local keys = {}
-	for key in pairs(GuildThingDB.P2PData or {}) do
+	for key in pairs(entries) do
 		table.insert(keys, key)
 	end
 	table.sort(keys, function(a, b)
-		return (GuildThingDB.P2PData[a].receivedAt or 0) < (GuildThingDB.P2PData[b].receivedAt or 0)
+		return (entries[a].receivedAt or 0) < (entries[b].receivedAt or 0)
 	end)
 
 	local rows = {}
 	for i = 1, math.min(limit, #keys) do
-		local entry = GuildThingDB.P2PData[keys[i]]
+		local entry = entries[keys[i]]
 		table.insert(rows, string.format("%s,%s,%d", entry.name, EntrySignatureHash(entry), entry.receivedAt or 0))
 	end
 	return table.concat(rows, ";")
@@ -594,16 +699,16 @@ end
 local function IsGuildMember(name)
 	return FindGuildRosterEntry(name) ~= nil
 end
+GT.IsGuildMember = IsGuildMember
 
 local function GetGossipState()
-	GuildThingDB.P2PGossipState = GuildThingDB.P2PGossipState or {}
-	return GuildThingDB.P2PGossipState
+	return GT.GetP2PGossipState() or {}
 end
 
 local function PickGossipPartner()
 	local state = GetGossipState()
 	local candidates = {}
-	for key, entry in pairs(GuildThingDB.P2PData or {}) do
+	for key, entry in pairs(GT.GetP2PData() or {}) do
 		local lastSynced = state[key]
 		local recently = lastSynced and (time() - lastSynced) < GOSSIP_COOLDOWN_SECONDS
 		if not recently and entry.name and IsGuildMemberOnline(entry.name) then
@@ -697,10 +802,17 @@ end
 -- For every row that doesn't match what we already have cached (missing
 -- entirely, or a different hash), ASK the peer who showed it to us —
 -- one whisper per gap, ChatThrottleLib paces them same as anything else.
+-- Compares against GT.GetGossipableEntries() — the same combined set
+-- BuildCombinedHash/BuildDigestRows advertise to gossip partners — not
+-- just GT.GetP2PData(). Comparing against P2PData alone meant any of your
+-- own alts (only ever present in the gossipable set, never actually
+-- stored in P2PData) permanently looked "missing", triggering a wasted
+-- ASKQ round-trip for them every single round.
 local function OnAckDigest(senderName, rowsStr)
+	local entries = GT.GetGossipableEntries()
 	for _, row in ipairs(ParseDigestRows(rowsStr)) do
 		local key = GT.ClubScanKey(row.name, GetRealmName())
-		local ownEntry = GuildThingDB.P2PData and GuildThingDB.P2PData[key]
+		local ownEntry = entries[key]
 		local ownHash = ownEntry and tostring(EntrySignatureHash(ownEntry))
 		if ownHash ~= row.hash then
 			SafeSendAddonMessage("BULK", "ASKQ:" .. row.name, "WHISPER", senderName, "ASKQ")
@@ -730,7 +842,7 @@ local function OnAskRequest(senderName, targetName)
 		return
 	end
 
-	local entry = GuildThingDB.P2PData and GuildThingDB.P2PData[GT.ClubScanKey(targetName, GetRealmName())]
+	local entry = GT.GetGossipableEntries()[GT.ClubScanKey(targetName, GetRealmName())]
 	if not entry then
 		return
 	end
@@ -798,19 +910,46 @@ local function HandleCompletePayload(senderName, blob, channel)
 	-- a stray number here previously crashed the whole Overview roster.
 	local rawSubject = type(payload.s) == "string" and payload.s or nil
 
+	-- rawPayloadS: payload.s AS RECEIVED, whatever type it actually was —
+	-- tostring'd so a corrupt/unexpected value (e.g. a number, like the
+	-- one that once turned up in the wild) is directly visible in the log
+	-- instead of silently vanishing into the senderName fallback below.
+	-- Same idea as the outgoing/raw logs' `message` field: capture what
+	-- actually came in, not just what we decided to do with it, so a
+	-- future case like that is diagnosable from the log alone.
 	PushLog(completedPayloadLog, {
 		at = time(),
 		from = senderName,
 		channel = channel,
 		subject = rawSubject or senderName,
+		rawPayloadS = payload.s ~= nil and tostring(payload.s) or nil,
 		isHello = channel == "WHISPER" and not rawSubject,
 	})
 
 	local subjectName = rawSubject or senderName
-	GuildThingDB.P2PData = GuildThingDB.P2PData or {}
 	local key = GT.ClubScanKey(subjectName, GetRealmName())
 
-	local existing = GuildThingDB.P2PData[key]
+	-- A relayed reply CAN legitimately name the current character as its
+	-- subject — e.g. a gossip partner's digest still lists you (you're
+	-- never in your own P2PData to begin with, since self-echoes are
+	-- filtered before this ever runs, so your own row always looks
+	-- "missing" to OnAckDigest), which gets ASKQ'd and answered right
+	-- back to you. Storing that would create a permanent ghost entry for
+	-- yourself: it can never fail the guild-membership prune check, so it
+	-- never gets cleaned up, inflates GT.CountKnownPeers(), shows your own
+	-- name in the "Known peers" list, and could even get you picked as
+	-- your own gossip partner. You already have full authoritative data
+	-- about yourself locally — never worth caching a copy of it here.
+	if key == GT.ClubScanKey(UnitName("player"), GetRealmName()) then
+		return
+	end
+
+	local p2pData = GT.GetP2PData()
+	if not p2pData then
+		return
+	end
+
+	local existing = p2pData[key]
 	local recipeNames = existing and existing.recipeNames or {}
 	for _, spellID in ipairs(payload.ids) do
 		local name = spellIDToRecipeName[spellID]
@@ -819,7 +958,7 @@ local function HandleCompletePayload(senderName, blob, channel)
 		end
 	end
 
-	GuildThingDB.P2PData[key] = {
+	p2pData[key] = {
 		name = subjectName,
 		realm = GetRealmName(),
 		class = payload.c,
@@ -848,7 +987,10 @@ local function OnAddonMessage(prefix, message, channel, sender)
 		return
 	end -- ignore our own broadcast, if it ever echoes
 
-	PushLog(rawMessageLog, { at = time(), from = senderName, channel = channel, kind = ClassifyMessage(message) })
+	PushLog(
+		rawMessageLog,
+		{ at = time(), from = senderName, channel = channel, kind = ClassifyMessage(message), message = message }
+	)
 
 	-- Only a GUILD broadcast can trigger a hello — never a WHISPER, or
 	-- two strangers who don't know each other could whisper back and
@@ -900,6 +1042,24 @@ local function OnAddonMessage(prefix, message, channel, sender)
 	end
 end
 
+-- Developer-only: wipes every peer this character's guild bucket knows
+-- about (GT.GetP2PData()), for testing sync/pruning from a clean slate
+-- without waiting for real (or fake) peers to naturally age out. Doesn't
+-- touch gossipPartnerCooldowns — those are harmless bookkeeping either
+-- way (see GT.GetP2PGossipState) and clearing them isn't the point here.
+function GT.DebugResetPeers()
+	local data = GT.GetP2PData()
+	if not data then
+		return 0
+	end
+	local count = 0
+	for key in pairs(data) do
+		data[key] = nil
+		count = count + 1
+	end
+	return count
+end
+
 -----------------------------
 -- PEER GC (departed members) --
 -----------------------------
@@ -911,7 +1071,7 @@ end
 -- piggybacks on guild roster churn the addon was already watching for.
 -- Also callable directly (Settings button) for an on-demand check.
 function GT.PruneDepartedPeers()
-	local data = GuildThingDB.P2PData
+	local data = GT.GetP2PData()
 	if not data then
 		return 0
 	end
@@ -938,16 +1098,140 @@ function GT.PruneDepartedPeers()
 	return removed
 end
 
--- Settings-page button: request a fresh roster from the server AND prune
--- immediately against whatever roster data we have right now. The request
--- is async (server round-trip), so this can't wait for the freshest
--- possible answer before pruning — but the automatic GUILD_ROSTER_UPDATE
--- hook above catches up moments later once the server actually responds,
--- so nothing is missed, just possibly caught one event later than an
--- instant click-to-result would suggest.
-function GT.RefreshGuildRosterAndPrunePeers()
+-- GUILD_ROSTER_UPDATE can fire several times in a burst while the server
+-- sends the roster in batches — for a large guild (seen in the wild:
+-- 431 members) those batches can legitimately be spaced several seconds
+-- apart, so even a "quiet for a few seconds" debounce can still fire on
+-- a still-incomplete roster if it ever catches a gap between two
+-- batches. A nonzero-but-incomplete count was enough to wipe real peers
+-- who just hadn't landed in the partial roster yet — and once wiped,
+-- that data is just gone, no self-correction later undoes it. Given
+-- that, this errs heavily toward correctness over speed: pruning isn't
+-- time-critical (nothing breaks if it waits), being wrong is expensive
+-- and permanent, so patience costs nothing here.
+--
+-- Verify convergence, not just a single quiet interval: only trust the
+-- roster once GetNumGuildMembers() reads the SAME count
+-- PRUNE_REQUIRED_STABLE_STREAK times in a row (a lone match could still
+-- just be a lull between batches for a big guild). Capped at
+-- MAX_PRUNE_SETTLE_CHECKS rounds so a guild that pathologically never
+-- reports a stable count still eventually prunes rather than never
+-- running at all — worst case a couple minutes, which is fine here.
+--
+-- Also rate-limited to once a day (GuildThingDB.lastPeerPruneAt): there's
+-- no need to even attempt this on every single login/reload, and fewer
+-- attempts means fewer chances to ever hit an unlucky timing window in
+-- the first place. force bypasses the daily limit — used by the manual
+-- Settings-page "Refresh roster / clean up peers" button and the Debug
+-- page's test button, since an explicit user request should always
+-- actually run, not get silently skipped by the automatic path's limit.
+--
+-- Every caller — the automatic GUILD_ROSTER_UPDATE hook (Core.lua), the
+-- manual Settings button, and the Debug page test button — routes
+-- through this ONE function, so none of them duplicate (and risk
+-- drifting out of sync with) this same guard. callback (optional)
+-- receives the removed count once the prune actually runs, or is
+-- skipped entirely by the daily rate limit.
+local PRUNE_SETTLE_CHECK_SECONDS = 5
+local PRUNE_REQUIRED_STABLE_STREAK = 3
+local MAX_PRUNE_SETTLE_CHECKS = 20
+local PRUNE_MIN_INTERVAL_SECONDS = 24 * 60 * 60
+
+local pruneDebounceTimer
+local pruneLastSeenMemberCount = nil
+local pruneStableStreak = 0
+local pruneChecksRemaining = 0
+
+-- verbose: prints each settle-check round to chat — only ever passed by
+-- the Debug page's explicit "Test roster prune settling" button/command,
+-- never by the automatic GUILD_ROSTER_UPDATE hook or the Settings-page
+-- button, so a regular user never sees this chatter from something that
+-- just ran on its own in the background. Deliberately NOT gated on
+-- Developer mode alone — that would still print during an automatic run
+-- for anyone who happens to have it enabled, which is exactly the noise
+-- this is meant to avoid.
+function GT.RequestDebouncedPeerPrune(callback, force, verbose)
+	if not force then
+		local lastPrunedAt = GuildThingDB.lastPeerPruneAt
+		if lastPrunedAt and (time() - lastPrunedAt) < PRUNE_MIN_INTERVAL_SECONDS then
+			if callback then
+				callback(0)
+			end
+			return
+		end
+	end
+
+	if pruneDebounceTimer then
+		pruneDebounceTimer:Cancel()
+	end
+	pruneLastSeenMemberCount = nil
+	pruneStableStreak = 0
+	pruneChecksRemaining = MAX_PRUNE_SETTLE_CHECKS
+
+	local function CheckSettled()
+		pruneDebounceTimer = nil
+		local currentCount = GetNumGuildMembers()
+		pruneChecksRemaining = pruneChecksRemaining - 1
+
+		if currentCount == pruneLastSeenMemberCount then
+			pruneStableStreak = pruneStableStreak + 1
+		else
+			pruneStableStreak = 1
+		end
+		pruneLastSeenMemberCount = currentCount
+
+		local settled = pruneStableStreak >= PRUNE_REQUIRED_STABLE_STREAK or pruneChecksRemaining <= 0
+
+		if verbose then
+			if settled then
+				print(
+					("|cffffff00[GuildThing]|r roster settle check: %d members, stable x%d — settled, pruning now."):format(
+						currentCount,
+						pruneStableStreak
+					)
+				)
+			else
+				print(
+					("|cffffff00[GuildThing]|r roster settle check: %d members, stable x%d/%d — checking again in %ds (%d left)."):format(
+						currentCount,
+						pruneStableStreak,
+						PRUNE_REQUIRED_STABLE_STREAK,
+						PRUNE_SETTLE_CHECK_SECONDS,
+						pruneChecksRemaining
+					)
+				)
+			end
+		end
+
+		if not settled then
+			pruneDebounceTimer = C_Timer.NewTimer(PRUNE_SETTLE_CHECK_SECONDS, CheckSettled)
+			return
+		end
+
+		local removed = GT.PruneDepartedPeers()
+		GuildThingDB.lastPeerPruneAt = time()
+		if verbose then
+			print(("|cffffff00[GuildThing]|r roster settle check: pruned %d departed peer(s)."):format(removed))
+		end
+		if callback then
+			callback(removed)
+		end
+	end
+
+	pruneDebounceTimer = C_Timer.NewTimer(PRUNE_SETTLE_CHECK_SECONDS, CheckSettled)
+end
+
+-- Settings-page button: request a fresh roster from the server, then prune
+-- through the same debounced path as automatic roster updates — NOT
+-- immediately, since the refresh request is async (server round-trip) and
+-- pruning right away would race the same partial-roster window
+-- GT.RequestDebouncedPeerPrune exists to avoid. force=true: an explicit
+-- button click should always actually run, not get silently skipped by
+-- the once-a-day limit. callback receives the removed count once the
+-- settle-check finishes, a few seconds to a couple minutes later.
+function GT.RefreshGuildRosterAndPrunePeers(callback)
 	RequestGuildRosterRefresh()
-	return GT.PruneDepartedPeers()
+	GT.RequestDebouncedPeerPrune(callback, true)
 end
 
 -----------------------------

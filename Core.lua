@@ -11,6 +11,14 @@ function GT.CharKey()
     return UnitName("player") .. "-" .. GetRealmName()
 end
 
+-- KnownCharacters: every "Name-Realm" key that's ever been GetCharEntry's
+-- own character on this account — GuildThingDB is account-wide (plain
+-- SavedVariables, not PerCharacter), so it also holds non-character keys
+-- (P2PDataByGuild, GuildData, minimap, ...) that a blind scan of
+-- GuildThingDB's top-level keys would wrongly treat as alts. This
+-- registry is the reliable way to tell "this key is one of my own
+-- characters" apart from everything else living in the same table. Feeds
+-- GT.GetOtherOwnCharactersInGuild below.
 local function GetCharEntry()
     local key = GT.CharKey()
     GuildThingDB[key] = GuildThingDB[key] or {
@@ -21,7 +29,75 @@ local function GetCharEntry()
     }
     local entry = GuildThingDB[key]
     entry.class = select(2, UnitClass("player"))
+    -- Refreshed every login so an alt that switches guilds updates here
+    -- too, not just at first-ever login.
+    entry.guildKey = GT.GetGuildKey()
+    GuildThingDB.KnownCharacters = GuildThingDB.KnownCharacters or {}
+    GuildThingDB.KnownCharacters[key] = true
     return entry
+end
+
+-- Other characters on this account that have logged in with the addon
+-- before AND are in the SAME guild as whoever's playing right now — lets
+-- Overview show an alt's own scanned recipes without needing a manual
+-- export/import round trip, since the normal P2P mesh can't do it (you
+-- never receive your own broadcast, and two of your own characters can
+-- never be online at the same time to hear each other anyway).
+--
+-- Two checks, not one: entry.guildKey only updates when that SPECIFIC
+-- alt logs in, so it goes stale the moment an alt leaves the guild
+-- without logging back in — left unchecked, this account would keep
+-- showing (and, worse, gossiping — see GT.GetGossipableEntries in
+-- P2PSync.lua) a departed alt's data to the guild it left forever. The
+-- live GT.IsGuildMember roster check (same one normal peer pruning
+-- already trusts) catches that in real time: the alt's name just won't
+-- be in the CURRENT guild's roster anymore, regardless of what its own
+-- stale guildKey still claims.
+function GT.GetOtherOwnCharactersInGuild()
+    local selfKey = GT.CharKey()
+    local guildKey = GT.GetGuildKey()
+    if not guildKey then
+        return {}
+    end
+    local others = {}
+    for key in pairs(GuildThingDB.KnownCharacters or {}) do
+        if key ~= selfKey then
+            local entry = GuildThingDB[key]
+            if entry and entry.guildKey == guildKey and GT.IsGuildMember(entry.name) then
+                table.insert(others, { name = entry.name, realm = entry.realm, class = entry.class, key = key })
+            end
+        end
+    end
+    table.sort(others, function(a, b) return (a.name or ""):lower() < (b.name or ""):lower() end)
+    return others
+end
+
+-- A P2PData-shaped view of one own alt's own scan (name/class/recipeNames/
+-- receivedAt, same fields HandleCompletePayload stores for a real peer)
+-- so the gossip mesh (GT.GetGossipableEntries, P2PSync.lua) can treat
+-- "someone asks about this alt" the same as asking about any real peer —
+-- nil if that alt hasn't scanned anything worth relaying.
+function GT.BuildOwnAltP2PEntry(altKey)
+    local entry = GuildThingDB[altKey]
+    if not entry then
+        return nil
+    end
+    local recipeNames = {}
+    for _, recipes in pairs(entry.professions or {}) do
+        for _, r in ipairs(recipes) do
+            recipeNames[r.name] = true
+        end
+    end
+    if not next(recipeNames) then
+        return nil
+    end
+    return {
+        name = entry.name,
+        realm = entry.realm,
+        class = entry.class,
+        recipeNames = recipeNames,
+        receivedAt = entry.lastUpdate or 0,
+    }
 end
 
 -- Developer-only reset, wired from Debug.lua's HandleDebugCommand / the
@@ -173,11 +249,22 @@ local PRIMARY_PROFESSION_ID_TO_NAME = {
     [164] = "Blacksmithing",
     [165] = "Leatherworking",
     [171] = "Alchemy",
+    [182] = "Herbalism",
+    [186] = "Mining",
     [197] = "Tailoring",
     [202] = "Engineering",
     [333] = "Enchanting",
+    [393] = "Skinning",
     [755] = "Jewelcrafting",
 }
+
+-- Gathering professions have no recipe list to catalog at all (nothing
+-- to open/scan, no tradeskill window the way Smelting has for Mining) —
+-- deliberately absent from GuildThing_CatalogOrder/Catalog (site-
+-- generated, crafting-only). Tracked here purely so their skill RANK
+-- still shows in Overview, same as any crafting profession with a rank
+-- but no scanned/exported recipe data yet (see GetCharacterProfessionSummary).
+local GATHERING_PROFESSION_NAMES = { "Herbalism", "Mining", "Skinning" }
 
 function GT.ClubScanKey(name, realm)
     return string.lower((name or "") .. "-" .. (realm or ""))
@@ -192,7 +279,7 @@ end
 -- data received directly from another GuildThing client, no export
 -- needed. Same key convention as ClubScan above.
 function GT.GetP2PEntry(name, realm)
-    local data = GuildThingDB.P2PData
+    local data = GT.GetP2PData()
     return data and data[GT.ClubScanKey(name, realm)]
 end
 
@@ -274,28 +361,15 @@ local clubScanFrame = CreateFrame("Frame")
 clubScanFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
 clubScanFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
 
--- GUILD_ROSTER_UPDATE can fire several times in a burst while the server
--- sends the roster in batches after login/reload — GetNumGuildMembers()
--- reading a nonzero-but-still-incomplete count mid-burst (not just a
--- flat 0) was enough to wipe real peers in the wild, since anyone not in
--- that partial roster yet fails IsGuildMember and gets pruned. Debounce
--- instead of pruning on every fire: only prune once no further roster
--- update has arrived for a few seconds, i.e. once it's actually settled.
-local pruneDebounceTimer
-
+-- GT.RequestDebouncedPeerPrune (P2PSync.lua) protects against pruning off
+-- an incomplete mid-burst roster — routed through there instead of
+-- calling GT.PruneDepartedPeers directly so the manual Settings-page
+-- "Refresh roster / clean up peers" button (GT.RefreshGuildRosterAndPrunePeers)
+-- gets the exact same protection through the same debounce timer, not a
+-- second copy of the guard that's easy to let drift out of sync.
 clubScanFrame:SetScript("OnEvent", function()
     ScanGuildClubProfessions()
-
-    if pruneDebounceTimer then
-        pruneDebounceTimer:Cancel()
-    end
-    -- GT.PruneDepartedPeers is defined in P2PSync.lua, which loads after
-    -- this file, but by the time this timer actually fires at runtime
-    -- every file has already loaded.
-    pruneDebounceTimer = C_Timer.NewTimer(3, function()
-        pruneDebounceTimer = nil
-        GT.PruneDepartedPeers()
-    end)
+    GT.RequestDebouncedPeerPrune()
 end)
 
 -----------------------------
@@ -449,6 +523,13 @@ function GT.GetProfessionOrder()
     return GuildThing_CatalogOrder or {}
 end
 
+-- See GATHERING_PROFESSION_NAMES above — exposed so UI.lua's Overview
+-- filter bar can offer them as filter pills too, same as any catalogued
+-- (crafting) profession.
+function GT.GetGatheringProfessionNames()
+    return GATHERING_PROFESSION_NAMES
+end
+
 -- The full catalog entry list for one profession (name/icon/kind/id per
 -- recipe), regardless of whether anyone's actually scanned/known it.
 function GT.GetCatalogForProfession(profName)
@@ -489,7 +570,7 @@ function GT.GetCraftersForRecipe(profName, recipeName)
         addCrafter(entry.name, entry.realm, entry.class)
     end
 
-    for _, peer in pairs(GuildThingDB.P2PData or {}) do
+    for _, peer in pairs(GT.GetP2PData() or {}) do
         if peer.recipeNames and peer.recipeNames[recipeName] then
             addCrafter(peer.name, peer.realm, peer.class)
         end
@@ -584,6 +665,14 @@ function GT.GetRoster()
     local selfEntry = GetCharEntry()
     addEntry(selfEntry.name, selfEntry.realm, selfEntry.class, true)
 
+    -- Added before ClubScan/P2PData below so `seen` dedup prefers this
+    -- (a real scan) over a same-name entry those would otherwise add —
+    -- an alt's own scan is always more accurate than a rank-only ClubScan
+    -- guess or stale P2P cache of it.
+    for _, alt in ipairs(GT.GetOtherOwnCharactersInGuild()) do
+        addEntry(alt.name, alt.realm, alt.class, false)
+    end
+
     local guildData = GuildThingDB.GuildData
     if guildData and guildData.characters then
         for _, char in ipairs(guildData.characters) do
@@ -595,12 +684,26 @@ function GT.GetRoster()
         addEntry(entry.name, entry.realm, entry.class, false)
     end
 
-    for _, entry in pairs(GuildThingDB.P2PData or {}) do
+    for _, entry in pairs(GT.GetP2PData() or {}) do
         addEntry(entry.name, entry.realm, entry.class, false)
     end
 
     table.sort(roster, function(a, b) return a.name:lower() < b.name:lower() end)
     return roster
+end
+
+-- (name, realm) -> that alt's own GuildThingDB key, if it's one of this
+-- account's OTHER characters currently in the same guild — nil
+-- otherwise. Case-insensitive since callers pass roster-derived
+-- name/realm strings, not guaranteed to match GT.CharKey()'s casing.
+local function FindOwnAltCharKey(name, realm)
+    local lowerName, lowerRealm = string.lower(name or ""), string.lower(realm or "")
+    for _, alt in ipairs(GT.GetOtherOwnCharactersInGuild()) do
+        if string.lower(alt.name) == lowerName and string.lower(alt.realm or "") == lowerRealm then
+            return alt.key
+        end
+    end
+    return nil
 end
 
 -- Every recipe name a character knows, self, P2P-mesh, or imported, as a
@@ -614,6 +717,21 @@ local function GetKnownRecipeNames(name, realm)
     if IsSelf(name, realm) then
         local set = {}
         for _, recipes in pairs(GetCharEntry().professions) do
+            for _, r in ipairs(recipes) do
+                set[r.name] = true
+            end
+        end
+        return set
+    end
+
+    -- Another of this account's own characters, same guild — read its
+    -- own real scan directly (same shape as the self-branch above), no
+    -- P2P/export round trip needed or possible between your own alts
+    -- (see GT.GetOtherOwnCharactersInGuild).
+    local ownAltKey = FindOwnAltCharKey(name, realm)
+    if ownAltKey then
+        local set = {}
+        for _, recipes in pairs(GuildThingDB[ownAltKey].professions or {}) do
             for _, r in ipairs(recipes) do
                 set[r.name] = true
             end
@@ -709,6 +827,19 @@ function GT.GetCharacterProfessionSummary(name, realm)
         end
     end
 
+    -- Gathering professions: rank-only, no recipe catalog to check counts
+    -- against at all (see GATHERING_PROFESSION_NAMES above). isGathering
+    -- tells UI.lua's FormatProfessionTag not to append "(no data)" —
+    -- there's no such thing as recipe data for these to begin with, so
+    -- count staying 0 forever isn't a gap the way it is for a crafting
+    -- profession.
+    for _, profName in ipairs(GATHERING_PROFESSION_NAMES) do
+        local rank = clubEntry and clubEntry.professions[profName]
+        if rank then
+            table.insert(summary, { profession = profName, count = 0, rank = rank, isGathering = true })
+        end
+    end
+
     professionSummaryCache[key] = summary
     return summary
 end
@@ -757,7 +888,7 @@ function GT.ExportCurrentCharacter()
     entry.lastImport = time()
 
     local peerParts = {}
-    for _, peer in pairs(GuildThingDB.P2PData or {}) do
+    for _, peer in pairs(GT.GetP2PData() or {}) do
         local professions = BuildPeerProfessions(peer.recipeNames or {})
         if next(professions) then
             table.insert(peerParts, string.format(

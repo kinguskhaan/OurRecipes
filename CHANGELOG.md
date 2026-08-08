@@ -2,6 +2,25 @@
 
 All notable changes to this addon are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versioning follows [SemVer](https://semver.org/).
 
+## [0.1.0-beta.7] - 2026-08-08
+
+### Added
+
+- Overview now also shows this account's OTHER characters' own scanned recipes, as long as they're (as of their own last login) in the same guild as whoever's playing right now. Previously the only way to see one alt's data on another was a manual export/import round trip — P2P can't do it, since you never receive your own broadcast and two of your own characters can never be online at once to hear each other. Purely a local display feature: it doesn't change what gets broadcast to anyone else (still strictly the logged-in character's own recipes). If an alt actually leaves the guild, a live roster check (not just the stale locally-stored guild it last logged in under) drops them from this immediately.
+- Gossip now also relays your own alts' data, the same lazy on-demand way it already relays third parties' — an alt that rarely logs in still gets its recipes spread through the guild via whichever of your characters happens to be online, without a blanket broadcast on every login.
+- Settings → "Known peers" now has a per-peer Remove button, for manually dropping one specific entry.
+- Debug page: "Test roster prune settling" (watch the new roster-stability check run against real data on demand) and "Reset peers" (clear this guild's peer cache for retesting from scratch).
+- Peer data page's raw/completed/outgoing traffic logs now also capture the actual message content sent/received (not just metadata), plus the raw `payload.s` value exactly as received even when invalid — so a future data-corruption case is diagnosable directly from a user's own log instead of needing an external repro script.
+- Overview now shows Herbalism/Mining/Skinning skill rank too, same as any crafting profession you only have a rank for — sourced straight from Blizzard's own guild roster (no addon or sync involved on the other person's end, works for every guild member automatically), with filter pills alongside the crafting professions. No recipe list involved (gathering professions don't have one), so no "(no data)"/export wording where it wouldn't make sense.
+- Overview roster: with 2+ profession filters active (e.g. Blacksmithing + Mining), characters matching more of the selected filters now sort above ones matching fewer — the combo floats to the top. Filtering itself is unchanged (still shows anyone matching *any* active filter, not just people who match all of them) — this only reorders what's already shown.
+
+### Fixed
+
+- P2PData and P2PGossipState were one flat, account-wide pool shared across every character regardless of guild (`GuildThingDB` is plain `SavedVariables`, not per-character). Playing alts in different guilds meant each login's roster-based pruning treated the OTHER guild's peers as "departed" and deleted them — logging between two guilds repeatedly destroyed both guilds' accumulated peer data. Both tables are now scoped per guild+realm; existing data auto-migrates into whichever guild is active on first login after this update.
+- A gossip partner's digest can legitimately still list you (you're never in your own P2PData, so your own row never gets corrected from your side) — asking about it and receiving a relayed reply back stored a self-referential ghost entry for yourself: never prunable (you always pass your own guild-membership check), permanently inflating the peer count and showing your own name in "Known peers". HandleCompletePayload now drops a relayed payload whose subject is the current character.
+- OnAckDigest compared incoming digest rows against P2PData only, not the broader gossipable set (which also includes your own alts) — so any of your own alts always looked "missing" and triggered a wasted ASKQ round-trip, every single gossip round, forever.
+- Confirmed in the wild (431-member guild): the beta.6 debounce (quiet-for-3s) still wasn't enough — large guilds can send the roster in batches spaced further apart than that, so it could still fire on an incomplete roster and wipe real peers. Pruning now waits for `GetNumGuildMembers()` to read the *same* count three checks in a row (5s apart, up to ~20 checks) before trusting it, correctness prioritized over speed since pruning isn't time-sensitive. Also rate-limited to once a day, and unified so the manual Settings-page "Refresh roster / clean up peers" button goes through the exact same protection instead of pruning immediately on click.
+
 ## [0.1.0-beta.6] - 2026-08-03
 
 ### Fixed

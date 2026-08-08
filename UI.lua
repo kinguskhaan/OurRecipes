@@ -567,6 +567,9 @@ local function BuildOverviewPage(parent)
         for _, profName in ipairs(GT.GetProfessionOrder()) do
             table.insert(filterOptions, profName)
         end
+        for _, profName in ipairs(GT.GetGatheringProfessionNames()) do
+            table.insert(filterOptions, profName)
+        end
         table.insert(filterOptions, NO_PROFESSION_LABEL)
 
         for _, profName in ipairs(filterOptions) do
@@ -798,7 +801,7 @@ local function BuildOverviewPage(parent)
         if s.rank then
             tag = tag .. " " .. s.rank
         end
-        if s.count == 0 then
+        if s.count == 0 and not s.isGathering then
             tag = tag .. " (no data)"
         end
         return tag
@@ -822,6 +825,15 @@ local function BuildOverviewPage(parent)
             -- filter, not just within their raw skill rank.
             local sortRank = 0
             local hasData = false
+            -- How many of the ACTIVE filters this character matches at
+            -- all — with 2+ filters on (e.g. Blacksmithing + Mining),
+            -- sorting on this first surfaces people who hit the whole
+            -- combo ahead of people who only match one, without adding
+            -- an actual AND-filter mode (still a plain OR — this only
+            -- changes ordering, not who's shown). With 0 or 1 filter
+            -- active it's always the same for everyone shown, so it's a
+            -- no-op there — falls straight through to today's sort.
+            local matchCount = 0
 
             if #summary > 0 then
                 -- Default (no filters active) shows anyone with at least
@@ -832,6 +844,9 @@ local function BuildOverviewPage(parent)
                     local isRelevant = hasNoFilters or activeProfessionFilters[s.profession]
                     if isRelevant then
                         matchesFilter = true
+                        if not hasNoFilters then
+                            matchCount = matchCount + 1
+                        end
                         if s.rank and s.rank > sortRank then
                             sortRank = s.rank
                         end
@@ -862,6 +877,7 @@ local function BuildOverviewPage(parent)
                     r = r, g = g, b = b,
                     sortRank = sortRank,
                     hasData = hasData,
+                    matchCount = matchCount,
                     searchScore = searchScore,
                     onClick = function() ShowCharacter(char) end,
                 })
@@ -878,11 +894,16 @@ local function BuildOverviewPage(parent)
                 return a.name:lower() < b.name:lower()
             end)
         else
-            -- No search: has-data first (real recipe data before "(no
-            -- data)"/rank-only entries), then highest rank
-            -- (relevant-to-current-filter rank, see above), alphabetical as
-            -- a final tiebreak.
+            -- No search: matches-more-of-the-active-filters first (e.g.
+            -- Blacksmithing+Mining selected — the combo floats above
+            -- someone who only matches one), then has-data (real recipe
+            -- data before "(no data)"/rank-only entries), then highest
+            -- rank (relevant-to-current-filter rank, see above),
+            -- alphabetical as a final tiebreak.
             table.sort(items, function(a, b)
+                if a.matchCount ~= b.matchCount then
+                    return a.matchCount > b.matchCount
+                end
                 if a.hasData ~= b.hasData then
                     return a.hasData
                 end
@@ -955,10 +976,12 @@ local function BuildOverviewPage(parent)
             if s.count > 0 then
                 sub = tostring(s.count) .. " known"
                 clickable = true
+            elseif s.isGathering then
+                sub = ("Level %d"):format(s.rank)
             elseif hasAnyExport then
                 sub = ("Level %d — recipe data may be outdated"):format(s.rank)
             else
-                sub = ("Level %d — hasn't exported to GuildThing yet"):format(s.rank)
+                sub = ("Level %d — hasn't exported to OurRecipes yet"):format(s.rank)
             end
             table.insert(items, {
                 name = s.profession,
@@ -1197,9 +1220,15 @@ local function BuildSettingsPage(parent, onDeveloperModeChanged)
     pruneStatus:SetPoint("TOPLEFT", pruneHint, "BOTTOMLEFT", 0, -6)
 
     pruneBtn:SetScript("OnClick", function()
-        local removed = GT.RefreshGuildRosterAndPrunePeers()
-        pruneStatus:SetText(("Removed %d peer(s) no longer in the guild."):format(removed))
-        RefreshEffectiveStatus()
+        -- Debounced now (GT.RequestDebouncedPeerPrune) rather than
+        -- immediate, so a click mid-roster-load doesn't prune off an
+        -- incomplete roster — the actual result lands a few seconds
+        -- later via this callback instead of synchronously.
+        pruneStatus:SetText("Refreshing roster...")
+        GT.RefreshGuildRosterAndPrunePeers(function(removed)
+            pruneStatus:SetText(("Removed %d peer(s) no longer in the guild."):format(removed))
+            RefreshEffectiveStatus()
+        end)
     end)
 
     -- Same entry point as "/or debug broadcast" — skips the throttle
@@ -1263,11 +1292,49 @@ local function BuildSettingsPage(parent, onDeveloperModeChanged)
     peersHeaderText:SetPoint("LEFT", 0, 0)
     peersHeader.text = peersHeaderText
 
-    local peersList = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    peersList:SetPoint("TOPLEFT", peersHeader, "BOTTOMLEFT", 4, -4)
-    peersList:SetPoint("RIGHT", scrollChild, "RIGHT", -12, 0)
-    peersList:SetJustifyH("LEFT")
-    peersList:SetSpacing(2)
+    local peersRowsFrame = CreateFrame("Frame", nil, scrollChild)
+    peersRowsFrame:SetPoint("TOPLEFT", peersHeader, "BOTTOMLEFT", 4, -4)
+    peersRowsFrame:SetPoint("RIGHT", scrollChild, "RIGHT", -12, 0)
+    peersRowsFrame:SetHeight(1)
+
+    local peersEmptyText = peersRowsFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    peersEmptyText:SetPoint("TOPLEFT", 0, 0)
+    peersEmptyText:SetText("(none yet)")
+    peersEmptyText:Hide()
+
+    -- Row pool, grown on demand and reused across refreshes rather than
+    -- rebuilt from scratch each time — same reasoning as the roster rows
+    -- elsewhere in this file, just without a scroll frame, since this box
+    -- lives inside the Settings page's own scrollable area already and
+    -- typical peer counts are small enough to just stack directly.
+    local PEER_ROW_HEIGHT = 20
+    local peerRows = {}
+
+    local function GetOrCreatePeerRow(i)
+        local row = peerRows[i]
+        if row then
+            return row
+        end
+        row = CreateFrame("Frame", nil, peersRowsFrame)
+        row:SetHeight(PEER_ROW_HEIGHT)
+        row:SetPoint("TOPLEFT", 0, -(i - 1) * PEER_ROW_HEIGHT)
+        row:SetPoint("RIGHT", peersRowsFrame, "RIGHT", 0, 0)
+
+        local removeBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+        removeBtn:SetSize(60, 18)
+        removeBtn:SetPoint("RIGHT", 0, 0)
+        removeBtn:SetText("Remove")
+        row.removeBtn = removeBtn
+
+        local text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        text:SetPoint("LEFT", 0, 0)
+        text:SetPoint("RIGHT", removeBtn, "LEFT", -8, 0)
+        text:SetJustifyH("LEFT")
+        row.text = text
+
+        peerRows[i] = row
+        return row
+    end
 
     local peersExpanded = false
 
@@ -1276,20 +1343,34 @@ local function BuildSettingsPage(parent, onDeveloperModeChanged)
         peersHeaderText:SetText((peersExpanded and "\226\150\188 " or "\226\150\182 ") .. ("Known peers (%d)"):format(#peers))
 
         if not peersExpanded then
-            peersList:Hide()
+            peersRowsFrame:Hide()
             return
         end
+        peersRowsFrame:Show()
 
         if #peers == 0 then
-            peersList:SetText("(none yet)")
-        else
-            local lines = {}
-            for _, peer in ipairs(peers) do
-                table.insert(lines, ("%s (%s) — %d known"):format(peer.name, peer.class or "?", peer.recipeCount))
+            peersEmptyText:Show()
+            for _, row in ipairs(peerRows) do
+                row:Hide()
             end
-            peersList:SetText(table.concat(lines, "\n"))
+            peersRowsFrame:SetHeight(peersEmptyText:GetHeight())
+            return
         end
-        peersList:Show()
+        peersEmptyText:Hide()
+
+        for i, peer in ipairs(peers) do
+            local row = GetOrCreatePeerRow(i)
+            row.text:SetText(("%s (%s) — %d known"):format(peer.name, peer.class or "?", peer.recipeCount))
+            row.removeBtn:SetScript("OnClick", function()
+                GT.RemovePeer(peer.key)
+                RefreshPeersBox()
+            end)
+            row:Show()
+        end
+        for i = #peers + 1, #peerRows do
+            peerRows[i]:Hide()
+        end
+        peersRowsFrame:SetHeight(#peers * PEER_ROW_HEIGHT)
     end
 
     peersHeader:SetScript("OnClick", function()
@@ -1379,6 +1460,21 @@ local function BuildDebugPage(parent)
         GT.HandleDebugCommand("resetprofessions")
     end)
 
+    -- Forces GT.RequestDebouncedPeerPrune right now (bypassing the daily
+    -- limit) and prints each settle-check round to chat as it happens —
+    -- the fastest way to watch the roster-stability logic actually run,
+    -- rather than waiting for it to fire naturally on next login.
+    AddButton("Test roster prune settling", function()
+        GT.HandleDebugCommand("testprune")
+    end)
+
+    -- Clears every known peer for this guild — a clean slate for
+    -- re-testing sync/pruning from scratch, without waiting for real (or
+    -- fake) peers to age out on their own.
+    AddButton("Reset peers", function()
+        GT.HandleDebugCommand("resetpeers")
+    end)
+
     AddButton("Simulate testkingen (2 recipes)", function()
         GT.HandleDebugCommand("fakerecipe testkingen Adept's Elixir")
         GT.HandleDebugCommand("fakerecipe testkingen Arcane Elixir")
@@ -1426,9 +1522,10 @@ end
 -- PEER DATA PAGE --
 -----------------------------
 -- Developer-only, same gating as the Debug page above. Read-only
--- pretty-printed JSON dump of GuildThingDB.P2PData (and gossip state) —
--- the actual wire-level cache this character has built up, for
--- inspecting it directly instead of one line at a time via /or debug dump.
+-- pretty-printed JSON dump of the current guild's P2P cache (see
+-- GT.GetP2PData, P2PSync.lua) — the actual wire-level cache this
+-- character has built up, for inspecting it directly instead of one
+-- line at a time via /or debug dump.
 local function BuildPeerVisualizerPage(parent)
     local page = CreateFrame("Frame", nil, parent)
     page:SetAllPoints()
@@ -1439,7 +1536,7 @@ local function BuildPeerVisualizerPage(parent)
 
     local hint = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     hint:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
-    hint:SetText("Live snapshot of GuildThingDB.P2PData — what this character has learned about the guild.")
+    hint:SetText("Live snapshot of this guild's P2P peer cache — what this character has learned about the guild.")
 
     local refreshBtn = CreateFrame("Button", nil, page, "UIPanelButtonTemplate")
     refreshBtn:SetSize(80, 22)
